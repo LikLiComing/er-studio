@@ -1,0 +1,12 @@
+* { box-sizing: border-box; }
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  color: #1c1917;
+  background: #e7ecee;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+button, input { font-family: inherit; }
