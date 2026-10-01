@@ -4,7 +4,8 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
 import 'monaco-editor/min/vs/editor/editor.main.css'
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
 import { registerDbml } from './dbml-language'
-import { focusAtLine, setDbmlFromEditor, workspace } from '../workspace'
+import { bindEditor, focusAtLine, setDbmlFromEditor, workspace } from '../workspace'
+import type { TextSpan } from '../model/text-edit'
 
 const host = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
@@ -45,6 +46,12 @@ onMounted(() => {
     event.event.stopPropagation()
     focusAtLine(event.target.position.lineNumber)
   })
+  bindEditor({
+    applyEdit,
+    undo: () => editor?.trigger('er-studio', 'undo', null),
+    redo: () => editor?.trigger('er-studio', 'redo', null),
+    getValue: () => editor?.getValue() ?? workspace.dbml,
+  })
   applyMarkers()
 })
 
@@ -65,9 +72,24 @@ watch(() => workspace.jumpRequest, (request) => {
 })
 
 onBeforeUnmount(() => {
+  bindEditor(null)
   editor?.dispose()
   editor = null
 })
+
+function applyEdit(span: TextSpan, selectLine?: number): void {
+  if (!editor) return
+  editor.executeEdits('er-studio', [{
+    range: new monaco.Range(span.line, span.column, span.endLine, span.endColumn),
+    text: span.text,
+    forceMoveMarkers: true,
+  }])
+  if (!selectLine) return
+  const column = editor.getModel()?.getLineMaxColumn(selectLine) ?? 1
+  editor.setSelection(new monaco.Range(selectLine, 1, selectLine, column))
+  editor.revealLineInCenter(selectLine)
+  editor.focus()
+}
 
 function applyMarkers(): void {
   const model = editor?.getModel()

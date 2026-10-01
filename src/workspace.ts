@@ -2,14 +2,16 @@ import { reactive } from 'vue'
 import { canBindDeviceFile, openDeviceFile, saveDeviceFile } from './file/device-file'
 import { appendLayout, extractLayout } from './model/layout-comment'
 import { beautifyPositions, reconcilePositions } from './model/layout'
-import { dbmlIdent, locateNode, parseDbml } from './model/parse'
+import { dbmlIdent, inferenceKey, locateNode, parseDbml, refOperator } from './model/parse'
 import { routeKey } from './model/route'
 import { SAMPLE_DBML } from './model/sample'
-import type { ParseIssue, Point, SchemaModel } from './model/types'
+import { applySpan, deleteRange, insertBlock, type TextSpan } from './model/text-edit'
+import type { ParseIssue, Point, RefView, SchemaModel } from './model/types'
 
 export interface FocusRequest {
   id: string
   nonce: number
+  zoom: boolean
 }
 
 export interface JumpRequest {
@@ -17,13 +19,34 @@ export interface JumpRequest {
   nonce: number
 }
 
-const emptyModel: SchemaModel = { tables: [], enums: [], refs: [] }
+export type RefOp = '<' | '>' | '-' | '<>'
+
+const emptyModel: SchemaModel = { tables: [], enums: [], refs: [], enumLinks: [], omitted: [] }
+
+interface LayoutSnapshot {
+  positions: Record<string, Point>
+  routes: Record<string, Point[]>
+  hiddenInferences: string[]
+}
+
+interface EditorApi {
+  applyEdit: (span: TextSpan, selectLine?: number) => void
+  undo: () => void
+  redo: () => void
+  getValue: () => string
+}
 
 let fileHandle: FileSystemFileHandle | null = null
 let parseTimer = 0
 let noteTimer = 0
 let focusNonce = 0
 let jumpNonce = 0
+let restoring = false
+let undoOwner: 'layout' | 'text' = 'text'
+let redoPrefersLayout = false
+const layoutUndo: LayoutSnapshot[] = []
+const layoutRedo: LayoutSnapshot[] = []
+let editorApi: EditorApi | null = null
 
 export const workspace = reactive({
   screen: 'start' as 'start' | 'editor',
@@ -34,6 +57,10 @@ export const workspace = reactive({
   dbml: '',
   positions: {} as Record<string, Point>,
   routes: {} as Record<string, Point[]>,
+  hiddenInferences: [] as string[],
+  showInferred: true,
+  outlineOpen: false,
+  omittedDismissed: false,
   model: emptyModel as SchemaModel,
   issues: [] as ParseIssue[],
   externalRev: 0,
@@ -47,11 +74,20 @@ export const workspace = reactive({
   focusRequest: null as FocusRequest | null,
   jumpRequest: null as JumpRequest | null,
   pendingFit: false,
+  pendingSelectLine: 0,
   statusNote: '',
 })
 
+export function bindEditor(api: EditorApi | null): void {
+  editorApi = api
+}
+
 export function createNew(): void {
-  openText(SAMPLE_DBML, '未命名.dbml', null, true)
+  openText('', '未命名.dbml', null, false)
+}
+
+export function openSample(): void {
+  openText(SAMPLE_DBML, '示例.dbml', null, false)
 }
 
 export async function openFromDevice(): Promise<void> {
@@ -62,7 +98,7 @@ export async function openFromDevice(): Promise<void> {
 }
 
 export async function save(saveAs = false): Promise<void> {
-  const text = appendLayout(workspace.dbml, visiblePositions(), visibleRoutes())
+  const text = appendLayout(workspace.dbml, visiblePositions(), visibleRoutes(), [...workspace.hiddenInferences])
   const suggested = workspace.fileName || 'diagram.dbml'
   try {
     const saved = await saveDeviceFile(saveAs ? null : fileHandle, suggested, text, saveAs)
@@ -87,7 +123,44 @@ export function setDbmlFromEditor(text: string): void {
   if (text === workspace.dbml) return
   workspace.dbml = text
   workspace.dirty = true
+  if (!restoring) undoOwner = 'text'
   scheduleParse()
+}
+
+export function selectNode(id: string | null): void {
+  workspace.selectedId = id
+  workspace.selectedRefId = null
+}
+
+export function selectRef(id: string | null): void {
+  workspace.selectedRefId = id
+  if (id) workspace.selectedId = null
+}
+
+export function focusNode(id: string): void {
+  selectNode(id)
+  focusNonce += 1
+  workspace.focusRequest = { id, nonce: focusNonce, zoom: true }
+}
+
+export function toggleOutline(): void {
+  workspace.outlineOpen = !workspace.outlineOpen
+}
+
+export function toggleInferred(): void {
+  workspace.showInferred = !workspace.showInferred
+  const selected = selectedRef()
+  if (selected && !isRefVisible(selected)) workspace.selectedRefId = null
+}
+
+export function dismissOmitted(): void {
+  workspace.omittedDismissed = true
+}
+
+export function isRefVisible(ref: RefView): boolean {
+  if (!ref.inferred) return true
+  if (!workspace.showInferred) return false
+  return !workspace.hiddenInferences.includes(refKey(ref))
 }
 
 export function moveNode(id: string, x: number, y: number): void {
@@ -101,8 +174,18 @@ export function setRoute(id: string, points: Point[]): void {
   workspace.dirty = true
 }
 
+export function rememberLayout(): void {
+  if (restoring) return
+  layoutUndo.push(captureLayout())
+  if (layoutUndo.length > 50) layoutUndo.shift()
+  layoutRedo.length = 0
+  undoOwner = 'layout'
+  redoPrefersLayout = false
+}
+
 export function beautifyDiagram(): void {
   if (workspace.model.tables.length === 0 && workspace.model.enums.length === 0) return
+  rememberLayout()
   workspace.positions = beautifyPositions(workspace.model)
   workspace.routes = {}
   workspace.selectedId = null
@@ -111,13 +194,50 @@ export function beautifyDiagram(): void {
   setNote('已按关联关系重新排版')
 }
 
-export function addRef(fromTableId: string, fromField: string, toTableId: string, toField: string): void {
-  const line = `Ref: ${dbmlIdent(fromTableId)}.${dbmlIdent(fromField)} > ${dbmlIdent(toTableId)}.${dbmlIdent(toField)}`
-  const base = extractLayout(workspace.dbml).dbml.replace(/\s*$/, '')
-  workspace.dbml = `${base}\n\n${line}\n`
-  workspace.dirty = true
-  workspace.externalRev += 1
-  runParse()
+export function addRef(
+  fromTableId: string,
+  fromField: string,
+  toTableId: string,
+  toField: string,
+  op: RefOp,
+  fromOptional = false,
+  toOptional = false,
+): void {
+  const operator = `${fromOptional ? '?' : ''}${op}${toOptional ? '?' : ''}`
+  const statement = `Ref: ${dbmlIdent(fromTableId)}.${dbmlIdent(fromField)} ${operator} ${dbmlIdent(toTableId)}.${dbmlIdent(toField)}`
+  const inserted = insertBlock(currentText(), statement)
+  commitText(inserted.span, inserted.selectLine)
+  setNote('已写入关系')
+}
+
+export function materializeSelected(): void {
+  const ref = selectedRef()
+  if (!ref?.inferred || ref.from.fields.length === 0 || ref.to.fields.length === 0) return
+  const statement = `Ref: ${dbmlIdent(ref.from.tableId)}.${dbmlIdent(ref.from.fields[0])} ${refOperator(ref.fromCard, ref.toCard)} ${dbmlIdent(ref.to.tableId)}.${dbmlIdent(ref.to.fields[0])}`
+  const inserted = insertBlock(currentText(), statement)
+  commitText(inserted.span, inserted.selectLine)
+  setNote('已写入文件')
+}
+
+export function deleteSelectedRef(): void {
+  const ref = selectedRef()
+  if (!ref) return
+  if (ref.inferred) {
+    rememberLayout()
+    const key = refKey(ref)
+    if (!workspace.hiddenInferences.includes(key)) workspace.hiddenInferences.push(key)
+    workspace.selectedRefId = null
+    workspace.dirty = true
+    setNote('已隐藏这条推断关系')
+    return
+  }
+  if (ref.span.endLine < ref.span.line) {
+    setNote('无法定位这条关系的源码')
+    return
+  }
+  workspace.selectedRefId = null
+  commitText(deleteRange(currentText(), ref.span))
+  setNote('已从文件删除')
 }
 
 export function focusAtLine(line: number): void {
@@ -130,7 +250,7 @@ export function focusAtLine(line: number): void {
     : hit.id
   if (!target) return
   focusNonce += 1
-  workspace.focusRequest = { id: target, nonce: focusNonce }
+  workspace.focusRequest = { id: target, nonce: focusNonce, zoom: true }
 }
 
 export function jumpTo(line: number): void {
@@ -143,14 +263,62 @@ export function toggleEditor(): void {
   workspace.editorVisible = !workspace.editorVisible
 }
 
+export function undoChange(): boolean {
+  if (undoOwner === 'layout' && layoutUndo.length > 0) {
+    undoLayout()
+    redoPrefersLayout = true
+    if (layoutUndo.length === 0) undoOwner = 'text'
+    setNote('已撤销排版')
+    return true
+  }
+  if (editorUndo()) {
+    redoPrefersLayout = false
+    undoOwner = 'text'
+    return true
+  }
+  if (layoutUndo.length > 0) {
+    undoLayout()
+    redoPrefersLayout = true
+    setNote('已撤销排版')
+    return true
+  }
+  return false
+}
+
+export function redoChange(): boolean {
+  if (redoPrefersLayout && layoutRedo.length > 0) {
+    redoLayout()
+    undoOwner = 'layout'
+    setNote('已重做排版')
+    return true
+  }
+  if (editorRedo()) {
+    redoPrefersLayout = false
+    undoOwner = 'text'
+    return true
+  }
+  if (layoutRedo.length > 0) {
+    redoLayout()
+    undoOwner = 'layout'
+    setNote('已重做排版')
+    return true
+  }
+  return false
+}
+
 function openText(text: string, name: string, handle: FileSystemFileHandle | null, dirty: boolean): void {
   const extracted = extractLayout(text)
   fileHandle = handle
+  layoutUndo.length = 0
+  layoutRedo.length = 0
+  undoOwner = 'text'
+  redoPrefersLayout = false
   workspace.fileName = name
   workspace.boundToDevice = Boolean(handle)
   workspace.dbml = extracted.dbml
   workspace.positions = extracted.positions
   workspace.routes = extracted.routes
+  workspace.hiddenInferences = extracted.hiddenInferences
   workspace.dirty = dirty
   workspace.screen = 'editor'
   workspace.selectedId = null
@@ -160,6 +328,8 @@ function openText(text: string, name: string, handle: FileSystemFileHandle | nul
   workspace.editorVisible = true
   workspace.editorWidth = Math.round(Math.min(560, Math.max(320, window.innerWidth * 0.38)))
   workspace.pendingFit = true
+  workspace.pendingSelectLine = 0
+  workspace.omittedDismissed = false
   workspace.externalRev += 1
   workspace.statusNote = ''
   runParse()
@@ -179,13 +349,49 @@ function runParse(): void {
     workspace.issues = []
     workspace.positions = reconcilePositions(workspace.positions, result.model)
     if (workspace.selectedId && !hasNode(workspace.selectedId)) workspace.selectedId = null
+    if (workspace.selectedRefId && !workspace.model.refs.some((ref) => ref.id === workspace.selectedRefId && isRefVisible(ref))) {
+      workspace.selectedRefId = null
+    }
+    const line = workspace.pendingSelectLine
+    if (line) {
+      workspace.pendingSelectLine = 0
+      const hit = locateNode(workspace.model, line)
+      if (hit?.kind === 'ref') selectRef(hit.id)
+    }
   } else {
     workspace.issues = result.issues
+    workspace.pendingSelectLine = 0
   }
 }
 
+function commitText(span: TextSpan, selectLine = 0): void {
+  undoOwner = 'text'
+  redoPrefersLayout = false
+  workspace.pendingSelectLine = selectLine
+  workspace.dirty = true
+  if (editorApi) {
+    editorApi.applyEdit(span, selectLine)
+    return
+  }
+  workspace.dbml = applySpan(workspace.dbml, span)
+  workspace.externalRev += 1
+  runParse()
+}
+
+function currentText(): string {
+  return editorApi?.getValue() ?? workspace.dbml
+}
+
+function selectedRef(): RefView | undefined {
+  return workspace.model.refs.find((ref) => ref.id === workspace.selectedRefId)
+}
+
+function refKey(ref: RefView): string {
+  return inferenceKey(ref.from.tableId, ref.from.fields[0] ?? '', ref.to.tableId, ref.to.fields[0] ?? '')
+}
+
 function visibleRoutes(): Record<string, Point[]> {
-  const keys = new Set(workspace.model.refs.map((ref) => routeKey(ref)))
+  const keys = new Set(workspace.model.refs.filter(isRefVisible).map((ref) => routeKey(ref)))
   const routes: Record<string, Point[]> = {}
   for (const [id, points] of Object.entries(workspace.routes)) {
     if (keys.has(id) && points.length > 0) routes[id] = points
@@ -210,6 +416,53 @@ function hasNode(id: string): boolean {
     || workspace.model.enums.some((item) => item.id === id)
 }
 
+function captureLayout(): LayoutSnapshot {
+  return {
+    positions: Object.fromEntries(Object.entries(workspace.positions).map(([id, point]) => [id, { ...point }])),
+    routes: Object.fromEntries(Object.entries(workspace.routes).map(([id, points]) => [id, points.map((point) => ({ ...point }))])),
+    hiddenInferences: [...workspace.hiddenInferences],
+  }
+}
+
+function restoreLayout(snapshot: LayoutSnapshot): void {
+  restoring = true
+  workspace.positions = snapshot.positions
+  workspace.routes = snapshot.routes
+  workspace.hiddenInferences = snapshot.hiddenInferences
+  workspace.dirty = true
+  restoring = false
+  const selected = selectedRef()
+  if (selected && !isRefVisible(selected)) workspace.selectedRefId = null
+}
+
+function undoLayout(): void {
+  const prev = layoutUndo.pop()
+  if (!prev) return
+  layoutRedo.push(captureLayout())
+  restoreLayout(prev)
+}
+
+function redoLayout(): void {
+  const next = layoutRedo.pop()
+  if (!next) return
+  layoutUndo.push(captureLayout())
+  restoreLayout(next)
+}
+
+function editorUndo(): boolean {
+  if (!editorApi) return false
+  const before = editorApi.getValue()
+  editorApi.undo()
+  return editorApi.getValue() !== before
+}
+
+function editorRedo(): boolean {
+  if (!editorApi) return false
+  const before = editorApi.getValue()
+  editorApi.redo()
+  return editorApi.getValue() !== before
+}
+
 function confirmDiscard(): boolean {
   return window.confirm('当前修改尚未保存，确定放弃并继续？')
 }
@@ -222,18 +475,46 @@ function setNote(message: string): void {
   }, 2600)
 }
 
+function typingTarget(event: KeyboardEvent): boolean {
+  const target = event.target
+  if (!(target instanceof HTMLElement)) return false
+  return Boolean(target.closest('.monaco-editor, input, textarea, select, [contenteditable="true"]'))
+}
+
 export function installWindowGuards(): () => void {
   const onKey = (event: KeyboardEvent) => {
     if (workspace.screen !== 'editor') return
     const meta = event.ctrlKey || event.metaKey
-    if (meta && event.key.toLowerCase() === 's') {
+    const key = event.key.toLowerCase()
+    if (meta && key === 's') {
       event.preventDefault()
       event.stopPropagation()
       void save(event.shiftKey)
-    } else if (meta && event.key === '\\') {
+      return
+    }
+    if (meta && event.key === '\\') {
       event.preventDefault()
       event.stopPropagation()
       toggleEditor()
+      return
+    }
+    if (meta && key === 'z') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (event.shiftKey) redoChange()
+      else undoChange()
+      return
+    }
+    if (meta && key === 'y') {
+      event.preventDefault()
+      event.stopPropagation()
+      redoChange()
+      return
+    }
+    if ((event.key === 'Delete' || event.key === 'Backspace') && !typingTarget(event) && workspace.selectedRefId) {
+      event.preventDefault()
+      event.stopPropagation()
+      deleteSelectedRef()
     }
   }
   const onLeave = (event: BeforeUnloadEvent) => {

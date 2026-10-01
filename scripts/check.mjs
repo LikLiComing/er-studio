@@ -10,6 +10,7 @@ const parseMod = await server.ssrLoadModule('/src/model/parse.ts')
 const layoutMod = await server.ssrLoadModule('/src/model/layout-comment.ts')
 const optionalMod = await server.ssrLoadModule('/src/model/optional.ts')
 const sampleMod = await server.ssrLoadModule('/src/model/sample.ts')
+const editMod = await server.ssrLoadModule('/src/model/text-edit.ts')
 
 const failures = []
 const check = (name, ok, detail = '') => {
@@ -29,6 +30,10 @@ if (sample.ok) {
   const userRef = sample.model.refs.find((ref) => ref.from.fields.includes('user_id') && ref.from.tableId === 'orders')
   check('orders ref from orders', Boolean(userRef))
   check('orders ref many to one', Boolean(userRef && userRef.fromCard.many && !userRef.toCard.many && !userRef.toCard.optional))
+  check('sample refs are explicit', sample.model.refs.every((ref) => ref.inferred === false))
+  check('enum link', sample.model.enumLinks.length === 1 && sample.model.enumLinks[0].enumId === 'product_status')
+  check('default value', sample.model.tables[0].fields[3].defaultValue === 'now()')
+  check('sample has no omitted groups', sample.model.omitted.length === 0, sample.model.omitted.join(','))
 }
 
 const optional = parseMod.parseDbml(`
@@ -48,9 +53,44 @@ if (optional.ok) {
 const broken = parseMod.parseDbml('Table {')
 check('syntax error', !broken.ok && broken.issues[0].line === 1)
 
-const round = layoutMod.appendLayout('Table users {\n  id int\n}', { users: { x: 80.2, y: 40 } })
+const round = layoutMod.appendLayout('Table users {\n  id int\n}', { users: { x: 80.2, y: 40 } }, {}, ['orders.user_id->users.id'])
 const extracted = layoutMod.extractLayout(round)
 check('layout roundtrip', extracted.positions.users.x === 80 && extracted.dbml.includes('Table users'))
+check('hidden inference roundtrip', extracted.hiddenInferences[0] === 'orders.user_id->users.id')
+
+const inferred = parseMod.parseDbml(`
+Table users { id int [pk] }
+Table posts { user_id int }
+`)
+check('inferred ref', inferred.ok && inferred.model.refs.length === 1 && inferred.model.refs[0].inferred)
+
+const grouped = parseMod.parseDbml(`
+TableGroup g { users }
+Project app { database_type: 'PostgreSQL' }
+Table users { id int [pk] }
+`)
+check('omitted constructs', grouped.ok && grouped.model.omitted.includes('TableGroup') && grouped.model.omitted.includes('Project'), grouped.ok ? grouped.model.omitted.join(',') : '')
+
+const qualified = parseMod.parseDbml(`
+Table core.users { id int [pk] }
+Table audit.users { id int [pk] }
+`)
+check('schema label', qualified.ok && qualified.model.tables.some((table) => table.label.includes('.')), qualified.ok ? qualified.model.tables.map((table) => table.label).join(',') : '')
+
+const inserted = editMod.insertBlock('Table users {\n  id int\n}', 'Ref: posts.user_id > users.id')
+check('insert selects ref line', editMod.applySpan('Table users {\n  id int\n}', inserted.span).split('\n')[inserted.selectLine - 1].startsWith('Ref:'))
+
+function refRange(line) {
+  const start = line.indexOf('ref:')
+  return { line: 1, column: start + 1, endLine: 1, endColumn: start + 1 + 'ref: > users.id'.length }
+}
+const inline = '  user_id int [not null, ref: > users.id]'
+const inlineNext = editMod.applySpan(`${inline}\n`, editMod.deleteRange(`${inline}\n`, refRange(inline)))
+check('inline ref removed', inlineNext.includes('[not null]') && !inlineNext.includes('ref:'), JSON.stringify(inlineNext))
+
+const onlyRef = '  user_id int [ref: > users.id]'
+const onlyNext = editMod.applySpan(`${onlyRef}\n`, editMod.deleteRange(`${onlyRef}\n`, refRange(onlyRef)))
+check('lone ref setting removed', onlyNext.trim() === 'user_id int', JSON.stringify(onlyNext))
 
 const neutralized = optionalMod.neutralizeOptional("Ref: a.b >? c.d\nNote: 'keep ? intact'")
 check('question in string kept', neutralized.text.includes("'keep ? intact'"))

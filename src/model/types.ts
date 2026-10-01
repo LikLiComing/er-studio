@@ -10,6 +10,7 @@ export interface FieldView {
   unique: boolean
   notNull: boolean
   increment: boolean
+  defaultValue: string
   note: string
   line: number
 }
@@ -21,6 +22,8 @@ export interface IndexView {
 export interface TableView {
   id: string
   name: string
+  schemaName: string
+  label: string
   headerColor: string
   note: string
   line: number
@@ -36,6 +39,8 @@ export interface EnumValueView {
 export interface EnumView {
   id: string
   name: string
+  schemaName: string
+  label: string
   line: number
   values: EnumValueView[]
 }
@@ -50,21 +55,39 @@ export interface RefEnd {
   fields: string[]
 }
 
+export interface SourceSpan {
+  line: number
+  column: number
+  endLine: number
+  endColumn: number
+}
+
 export interface RefView {
   id: string
   name: string
   color: string
   line: number
+  span: SourceSpan
+  inferred: boolean
   from: RefEnd
   to: RefEnd
   fromCard: Cardinality
   toCard: Cardinality
 }
 
+export interface EnumLink {
+  id: string
+  tableId: string
+  field: string
+  enumId: string
+}
+
 export interface SchemaModel {
   tables: TableView[]
   enums: EnumView[]
   refs: RefView[]
+  enumLinks: EnumLink[]
+  omitted: string[]
 }
 
 export interface ParseIssue {

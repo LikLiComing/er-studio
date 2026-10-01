@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { TableView } from '../model/types'
+import type { FieldView, TableView } from '../model/types'
 
 defineProps<{
   table: TableView
@@ -20,6 +20,22 @@ function onHeaderDown(event: PointerEvent): void {
   emit('select')
   emit('moveStart', event)
 }
+
+function fieldTitle(field: FieldView): string {
+  const parts = [
+    field.notNull ? '非空' : '',
+    field.unique ? '唯一' : '',
+    field.increment ? '自增' : '',
+    field.defaultValue ? `默认 ${field.defaultValue}` : '',
+    field.note,
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+
+function shortDefault(value: string): string {
+  const text = value.length > 12 ? `${value.slice(0, 11)}…` : value
+  return `= ${text}`
+}
 </script>
 
 <template>
@@ -35,7 +51,7 @@ function onHeaderDown(event: PointerEvent): void {
       @pointerdown.stop="onHeaderDown"
       @dblclick.stop="emit('jump', table.line)"
     >
-      <strong>{{ table.name }}</strong>
+      <strong :title="table.label">{{ table.label }}</strong>
       <span v-if="table.note" class="note" :title="table.note">注</span>
     </header>
     <div
@@ -54,13 +70,17 @@ function onHeaderDown(event: PointerEvent): void {
         <path d="M6.4 9.6 4.8 11.2a2.2 2.2 0 0 1-3.1-3.1L3.3 6.5a2.2 2.2 0 0 1 3.1 0l.7.7-1 1-.7-.7a.8.8 0 0 0-1.1 1.1l1.6 1.6a.8.8 0 0 0 1.1-1.1l-.6-.6 1-1 .6.6a2.2 2.2 0 0 1 0 3.1 2.2 2.2 0 0 1-3.1 0l.5-.5zm3.2-3.2 1.6-1.6a2.2 2.2 0 0 1 3.1 3.1L12.7 9.5a2.2 2.2 0 0 1-3.1 0l-.7-.7 1-1 .7.7a.8.8 0 0 0 1.1-1.1L10.1 6a.8.8 0 0 0-1.1 1.1l.6.6-1 1-.6-.6a2.2 2.2 0 0 1 0-3.1 2.2 2.2 0 0 1 3.1 0l-.5.5z" />
       </svg>
       <span v-else class="icon spacer" />
-      <span class="name" :class="{ required: field.notNull }" :title="field.note || undefined">{{ field.name }}</span>
-      <span v-if="field.unique" class="badge">U</span>
-      <span class="type">{{ field.typeName }}</span>
+      <span class="name" :class="{ required: field.notNull }" :title="fieldTitle(field) || undefined">{{ field.name }}</span>
+      <span v-if="field.notNull" class="mark" title="非空">*</span>
+      <span v-if="field.unique" class="badge" title="唯一">UQ</span>
+      <span v-if="field.increment" class="badge inc" title="自增">++</span>
+      <span v-if="field.note" class="note-mark" :title="field.note">注</span>
+      <span class="type" :title="field.defaultValue ? `默认 ${field.defaultValue}` : undefined">{{ field.typeName }}</span>
+      <span v-if="field.defaultValue" class="def" :title="`默认 ${field.defaultValue}`">{{ shortDefault(field.defaultValue) }}</span>
       <i
         class="handle"
         data-link-handle
-        title="拖到另一个字段以建立关系"
+        title="拖到字段上建立关系，松手后选择基数"
         @pointerdown.stop.prevent="emit('linkStart', field.name, $event)"
       />
     </div>
@@ -97,6 +117,10 @@ header {
 }
 header:active { cursor: grabbing; }
 strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 13px;
   font-weight: 650;
   letter-spacing: 0.01em;
@@ -133,23 +157,57 @@ strong {
   white-space: nowrap;
 }
 .name.required { font-weight: 650; }
+.mark {
+  flex: none;
+  color: #b45309;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
 .badge {
   flex: none;
   color: #0f766e;
   font-size: 10px;
   font-weight: 700;
 }
+.badge.inc { color: #b45309; }
+.note-mark {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 99px;
+  background: #f5f5f4;
+  color: #78716c;
+  font-size: 10px;
+  line-height: 14px;
+  text-align: center;
+}
 .type {
   margin-left: auto;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: #8a847c;
   font-size: 11.5px;
   white-space: nowrap;
 }
+.def {
+  flex: none;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #a8a29e;
+  font-size: 10.5px;
+  font-style: normal;
+  white-space: nowrap;
+}
 .handle {
-  width: 8px;
-  height: 8px;
+  width: 12px;
+  height: 12px;
+  margin-left: 2px;
   border-radius: 99px;
-  background: #d6d3d1;
+  background: #a8a29e;
+  box-shadow: 0 0 0 2px #fff;
   flex: none;
   cursor: crosshair;
 }

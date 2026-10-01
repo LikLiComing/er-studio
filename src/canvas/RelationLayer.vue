@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { RefView } from '../model/types'
+import type { EnumLink, RefView } from '../model/types'
 import {
   anchorAt,
   autoPoints,
@@ -18,6 +18,7 @@ import type { Point } from '../model/types'
 
 const props = defineProps<{
   refs: RefView[]
+  links: EnumLink[]
   boxes: Record<string, Box>
   fieldY: Record<string, number>
   selectedId: string | null
@@ -77,6 +78,24 @@ const drawn = computed(() => {
   })
 })
 
+const typeLinks = computed(() => {
+  const lanes = new Map<string, number>()
+  return props.links.flatMap((link) => {
+    const fromBox = props.boxes[link.tableId]
+    const toBox = props.boxes[link.enumId]
+    if (!fromBox || !toBox) return []
+    const fromY = props.fieldY[`${link.tableId}.${link.field}`] ?? fromBox.h / 2
+    const sides = chooseSides(fromBox, toBox, false)
+    const from = anchorAt(fromBox, fromY, sides.a, 8)
+    const to = anchorAt(toBox, 18, sides.b, 8)
+    const laneKey = `${link.tableId}:${link.enumId}`
+    const lane = lanes.get(laneKey) ?? 0
+    lanes.set(laneKey, lane + 1)
+    const points = autoPoints(from, to, lane, [])
+    return [{ id: link.id, enumId: link.enumId, d: pointsToPath(points) }]
+  })
+})
+
 function labelPoint(points: Point[]): Point {
   let best = points[0] ?? { x: 0, y: 0 }
   let bestLength = -1
@@ -103,14 +122,23 @@ function averageY(tableId: string, fields: string[], fallback: number): number {
 function transform(x: number, y: number, flip: boolean): string {
   return flip ? `translate(${x} ${y}) scale(-1 1)` : `translate(${x} ${y})`
 }
+
+function edgeLabel(ref: RefView): string {
+  if (ref.inferred) return ref.name ? `${ref.name} · 推断` : '推断'
+  return ref.name
+}
 </script>
 
 <template>
   <svg class="edges">
     <g transform="translate(4000 4000)">
+      <g v-for="link in typeLinks" :key="link.id" class="type-link">
+        <path class="type-line" :d="link.d" />
+      </g>
       <g
         v-for="edge in drawn"
         :key="edge.ref.id"
+        :class="{ inferred: edge.ref.inferred }"
         :style="{ color: edge.ref.color }"
         @pointerenter="hoverId = edge.ref.id"
         @pointerleave="hoverId = ''"
@@ -121,7 +149,7 @@ function transform(x: number, y: number, flip: boolean): string {
           @pointerdown.stop="emit('select', edge.ref.id)"
           @dblclick.stop="emit('jump', edge.ref.line)"
         />
-        <path class="line" :class="{ selected: selectedId === edge.ref.id }" :d="edge.d" />
+        <path class="line" :class="{ selected: selectedId === edge.ref.id, inferred: edge.ref.inferred }" :d="edge.d" />
         <g :transform="transform(edge.fromOrigin, edge.fromY, edge.fromFlip)">
           <path v-for="(d, i) in edge.fromGlyph.paths" :key="`f${i}`" class="glyph" :d="d" />
           <circle
@@ -144,8 +172,8 @@ function transform(x: number, y: number, flip: boolean): string {
             :r="circle.r"
           />
         </g>
-        <text v-if="edge.ref.name && (selectedId === edge.ref.id || hoverId === edge.ref.id)" class="label" :x="edge.labelX" :y="edge.labelY - 8">
-          {{ edge.ref.name }}
+        <text v-if="edgeLabel(edge.ref) && (selectedId === edge.ref.id || hoverId === edge.ref.id)" class="label" :x="edge.labelX" :y="edge.labelY - 8">
+          {{ edgeLabel(edge.ref) }}
         </text>
         <g v-if="selectedId === edge.ref.id || hoverId === edge.ref.id" class="bends">
           <circle
@@ -155,11 +183,11 @@ function transform(x: number, y: number, flip: boolean): string {
             :class="handle.axis"
             :cx="handle.x"
             :cy="handle.y"
-            r="6"
+            r="8"
             @pointerdown.stop="emit('bend', { key: edge.key, refId: edge.ref.id, handle, points: edge.points, event: $event })"
             @dblclick.stop="handle.kind === 'corner' && emit('clearBend', { key: edge.key, points: edge.points, index: handle.index })"
           >
-            <title>{{ handle.axis === 'y' ? '上下调整' : handle.axis === 'x' ? '左右调整' : '上下左右调整' }}</title>
+            <title>{{ handle.kind === 'corner' ? '拖动改走线，双击取消弯折' : handle.axis === 'y' ? '上下调整' : '左右调整' }}</title>
           </circle>
         </g>
       </g>
@@ -194,6 +222,14 @@ function transform(x: number, y: number, flip: boolean): string {
 }
 circle.glyph { fill: #fff; }
 .line.selected { stroke-width: 2.6; }
+.line.inferred { stroke-dasharray: 5 4; }
+.type-link { pointer-events: none; }
+.type-line {
+  fill: none;
+  stroke: #a8a29e;
+  stroke-width: 1.2;
+  stroke-dasharray: 2 4;
+}
 .glyph { fill: #fff; }
 .draft {
   stroke: #0f766e;

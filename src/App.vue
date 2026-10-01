@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import DiagramCanvas from './canvas/DiagramCanvas.vue'
 import DbmlEditor from './editor/DbmlEditor.vue'
-import { backToStart, beautifyDiagram, createNew, openFromDevice, save, workspace } from './workspace'
+import { backToStart, beautifyDiagram, createNew, deleteSelectedRef, dismissOmitted, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
 
 const canvas = ref<{ fit: () => void; zoomBy: (factor: number) => void } | null>(null)
 const splitting = ref(false)
@@ -10,13 +10,21 @@ const splitting = ref(false)
 const issueText = computed(() => {
   const issue = workspace.issues[0]
   if (!issue) return ''
-  return `${issue.message}（第 ${issue.line} 行）`
+  const extra = workspace.issues.length > 1 ? `，共 ${workspace.issues.length} 处` : ''
+  return `${issue.message}（第 ${issue.line} 行${extra}）`
 })
 
 const summary = computed(() => {
   const tables = workspace.model.tables.length
-  const refs = workspace.model.refs.length
+  const refs = workspace.model.refs.filter(isRefVisible).length
   return `${tables} 张表 · ${refs} 条关系`
+})
+
+const selectedRef = computed(() => workspace.model.refs.find((ref) => ref.id === workspace.selectedRefId) ?? null)
+
+const omittedText = computed(() => {
+  if (workspace.omittedDismissed || workspace.model.omitted.length === 0) return ''
+  return `文件含有 ${workspace.model.omitted.join('、')}，图上未画出`
 })
 
 function startSplit(event: PointerEvent): void {
@@ -43,8 +51,10 @@ function startSplit(event: PointerEvent): void {
       <p class="mark">ER</p>
       <h1>数据库关系工作站</h1>
       <p class="lede">左边写表结构，右边实时画出关系。图只保存在你自己的 DBML 文件里。</p>
+      <p v-if="workspace.downloadOnly" class="browser">此浏览器保存时会下载副本，不能直接写回原文件。</p>
       <div class="actions">
         <button type="button" class="primary" @click="createNew">新建</button>
+        <button type="button" @click="openSample">从示例开始</button>
         <button type="button" @click="openFromDevice">打开本地 DBML</button>
       </div>
     </div>
@@ -57,7 +67,10 @@ function startSplit(event: PointerEvent): void {
       <span class="file" :title="workspace.fileName">{{ workspace.fileName }}</span>
       <em v-if="workspace.dirty">未保存</em>
       <span class="spacer" />
-      <button type="button" :disabled="workspace.model.tables.length === 0" title="按关联关系分组并减少连线交叉" @click="beautifyDiagram(); canvas?.fit()">一键美化</button>
+      <button type="button" :class="{ on: workspace.outlineOpen }" title="搜索并定位表" @click="toggleOutline">表</button>
+      <button type="button" :class="{ on: workspace.editorVisible }" title="显示或隐藏编辑器（Ctrl+\）" @click="toggleEditor">编辑器</button>
+      <button type="button" :class="{ on: workspace.showInferred }" title="虚线是按字段名推断的外键，未写入文件" @click="toggleInferred">推断</button>
+      <button type="button" :disabled="workspace.model.tables.length === 0 && workspace.model.enums.length === 0" title="按关联关系分组并减少连线交叉，可撤销" @click="beautifyDiagram(); canvas?.fit()">一键美化</button>
       <button type="button" @click="canvas?.fit()">适应</button>
       <button type="button" @click="openFromDevice">打开</button>
       <button type="button" class="primary" @click="save(false)">保存</button>
@@ -73,9 +86,14 @@ function startSplit(event: PointerEvent): void {
       <DiagramCanvas ref="canvas" />
     </div>
     <footer class="status">
-      <span v-if="issueText" class="error">{{ issueText }}</span>
-      <span v-else-if="workspace.selectedRefId">拖节点调整走线：横段上下，竖段左右，拐点可同时改</span>
-      <span v-else>{{ summary }}</span>
+      <span>{{ summary }}</span>
+      <button v-if="issueText" type="button" class="error linkish" @click="jumpTo(workspace.issues[0].line)">{{ issueText }}</button>
+      <span v-else-if="selectedRef?.inferred">推断关系，未写入文件</span>
+      <span v-else-if="selectedRef">拖节点改走线 · 双击拐点取消 · Delete 删除</span>
+      <span v-else class="hint">双击跳到源码 · 拖字段圆点建关系</span>
+      <button v-if="selectedRef?.inferred" type="button" class="linkish" @click="materializeSelected">写入文件</button>
+      <button v-if="selectedRef" type="button" class="linkish" @click="deleteSelectedRef">{{ selectedRef.inferred ? '隐藏推断' : '删除关系' }}</button>
+      <button v-if="omittedText" type="button" class="linkish" :title="omittedText" @click="dismissOmitted">{{ omittedText }}</button>
       <span v-if="workspace.statusNote" class="note">{{ workspace.statusNote }}</span>
       <span v-if="workspace.downloadOnly" class="hint">此浏览器保存时会下载副本</span>
       <span class="spacer" />
@@ -131,8 +149,15 @@ h1 {
   font-size: 15px;
   line-height: 1.6;
 }
+.browser {
+  margin: 14px 0 0;
+  color: #a8a29e;
+  font-size: 13px;
+  line-height: 1.5;
+}
 .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 28px;
 }
@@ -154,6 +179,11 @@ button:hover { background: #f7f6f3; }
   color: #fff;
 }
 .primary:hover { background: #0d675f; }
+.on, button.on:hover {
+  background: #f0fdfa;
+  border-color: #99f6e4;
+  color: #0f766e;
+}
 .shell {
   height: 100%;
   display: flex;
@@ -175,6 +205,7 @@ button:hover { background: #f7f6f3; }
   border-top: 1px solid #e7e3dc;
   color: #78716c;
   font-size: 12px;
+  overflow: hidden;
 }
 .home { padding-inline: 8px; }
 .file {
@@ -207,6 +238,16 @@ em {
 .error { color: #b91c1c; }
 .note { color: #0f766e; }
 .hint { color: #a8a29e; }
+.linkish {
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  color: #57534e;
+  font-size: 12px;
+}
+.linkish.error { color: #b91c1c; }
+.linkish:hover { background: #f5f5f4; }
 .zoom-inline { display: none; gap: 4px; }
 .zoom-inline button {
   height: 22px;
@@ -214,6 +255,7 @@ em {
   font-size: 12px;
 }
 @media (max-width: 860px) {
+  .hint { display: none; }
   .bar { height: auto; flex-wrap: wrap; padding: 8px; }
   .body { flex-direction: column; }
   .pane { width: 100% !important; height: 38vh; }

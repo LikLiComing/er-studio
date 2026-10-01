@@ -6,15 +6,17 @@ export function extractLayout(text: string): {
   dbml: string
   positions: Record<string, Point>
   routes: Record<string, Point[]>
+  hiddenInferences: string[]
 } {
   const lines = text.split(/\r?\n/)
   const start = lines.findIndex((line) => line.trim() === MARK)
   if (start < 0) {
-    return { dbml: text.replace(/\s+$/, ''), positions: {}, routes: {} }
+    return { dbml: text.replace(/\s+$/, ''), positions: {}, routes: {}, hiddenInferences: [] }
   }
 
   const positions: Record<string, Point> = {}
   const routes: Record<string, Point[]> = {}
+  const hiddenInferences: string[] = []
   for (const line of lines.slice(start + 1)) {
     if (line.startsWith('// @pos ')) {
       const parts = line.slice('// @pos '.length).trim().split(/\s+/)
@@ -24,6 +26,11 @@ export function extractLayout(text: string): {
       const id = parts.join(' ')
       if (!id || Number.isNaN(x) || Number.isNaN(y)) continue
       positions[id] = { x, y }
+      continue
+    }
+    if (line.startsWith('// @noinfer ')) {
+      const id = line.slice('// @noinfer '.length).trim()
+      if (id) hiddenInferences.push(id)
       continue
     }
     if (!line.startsWith('// @route ')) continue
@@ -45,6 +52,7 @@ export function extractLayout(text: string): {
     dbml: lines.slice(0, start).join('\n').replace(/\s+$/, ''),
     positions,
     routes,
+    hiddenInferences,
   }
 }
 
@@ -52,6 +60,7 @@ export function appendLayout(
   dbml: string,
   positions: Record<string, Point>,
   routes: Record<string, Point[]> = {},
+  hiddenInferences: string[] = [],
 ): string {
   const clean = extractLayout(dbml).dbml.replace(/\s+$/, '')
   const positionLines = Object.entries(positions)
@@ -59,7 +68,8 @@ export function appendLayout(
   const routeLines = Object.entries(routes)
     .filter(([, points]) => points.length > 0)
     .map(([id, points]) => `// @route ${id} ${points.map((point) => `${Math.round(point.x)} ${Math.round(point.y)}`).join(' ')}`)
-  const body = [...positionLines, ...routeLines]
+  const hiddenLines = hiddenInferences.map((id) => `// @noinfer ${id}`)
+  const body = [...positionLines, ...routeLines, ...hiddenLines]
   if (body.length === 0) return `${clean}\n`
   return `${clean}\n\n${MARK}\n${body.join('\n')}\n`
 }

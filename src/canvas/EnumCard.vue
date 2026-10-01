@@ -23,7 +23,7 @@ function onHeaderDown(event: PointerEvent): void {
   <article class="card" :class="{ selected }" :data-node-id="item.id" @pointerdown="emit('select')">
     <header data-drag-handle @pointerdown.stop="onHeaderDown" @dblclick.stop="emit('jump', item.line)">
       <em>enum</em>
-      <strong>{{ item.name }}</strong>
+      <strong :title="item.label">{{ item.label }}</strong>
     </header>
     <div v-for="value in item.values" :key="value.name" class="value" :title="value.note || undefined">
       {{ value.name }}
@@ -60,7 +60,14 @@ em {
   text-transform: uppercase;
   opacity: 0.75;
 }
-strong { font-size: 13px; font-weight: 650; }
+strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 650;
+}
 .value {
   height: 26px;
   display: flex;

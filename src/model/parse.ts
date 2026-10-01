@@ -1,6 +1,6 @@
 import { Parser } from '@dbml/core'
 import { neutralizeOptional, type OptionalMark } from './optional'
-import { HEADER_PALETTE, type Cardinality, type ParseIssue, type ParseResult, type RefEnd, type SchemaModel } from './types'
+import { HEADER_PALETTE, type Cardinality, type ParseIssue, type ParseResult, type RefEnd, type SchemaModel, type SourceSpan } from './types'
 
 interface TokenRange {
   start: { line: number; column: number }
@@ -22,6 +22,7 @@ interface RawField {
   not_null?: boolean
   increment?: boolean
   note?: string | null
+  dbdefault?: { type?: string; value?: unknown } | string | number | boolean | null
   token?: TokenRange
 }
 
@@ -60,11 +61,16 @@ interface RawSchema {
   tables?: RawTable[]
   enums?: RawEnum[]
   refs?: RawRef[]
+  tableGroups?: { name?: string }[]
 }
 
 interface RawDatabase {
   hasDefaultSchema?: boolean
   schemas?: RawSchema[]
+  name?: string
+  note?: string
+  databaseType?: string
+  notes?: unknown[]
 }
 
 const parser = new Parser()
@@ -72,7 +78,7 @@ const parser = new Parser()
 export function parseDbml(source: string): ParseResult {
   const trimmed = source.trim()
   if (!trimmed) {
-    return { ok: true, model: { tables: [], enums: [], refs: [] } }
+    return { ok: true, model: { tables: [], enums: [], refs: [], enumLinks: [], omitted: [] } }
   }
 
   const { text, marks } = neutralizeOptional(source)
@@ -91,8 +97,17 @@ export function dbmlIdent(name: string): string {
     .join('.')
 }
 
+export function inferenceKey(fromTableId: string, fromField: string, toTableId: string, toField: string): string {
+  return `${fromTableId}.${fromField}->${toTableId}.${toField}`
+}
+
+export function refOperator(from: Cardinality, to: Cardinality): string {
+  const op = from.many && to.many ? '<>' : from.many ? '>' : to.many ? '<' : '-'
+  return `${from.optional ? '?' : ''}${op}${to.optional ? '?' : ''}`
+}
+
 export function locateNode(model: SchemaModel, line: number): { id: string; kind: 'table' | 'enum' | 'ref' } | null {
-  const ref = model.refs.find((item) => item.line === line)
+  const ref = model.refs.find((item) => item.line === line && !item.inferred)
   if (ref) return { id: ref.id, kind: 'ref' }
   for (const table of model.tables) {
     if (table.line === line || table.fields.some((field) => field.line === line)) {
@@ -112,11 +127,19 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
   const enums = schemas.flatMap((schema) => schema.enums ?? [])
   const refs = schemas.flatMap((schema) => schema.refs ?? [])
 
+  const nameCounts = new Map<string, number>()
+  for (const table of tables) nameCounts.set(table.name, (nameCounts.get(table.name) ?? 0) + 1)
+  const enumNameCounts = new Map<string, number>()
+  for (const item of enums) enumNameCounts.set(item.name, (enumNameCounts.get(item.name) ?? 0) + 1)
+
   const tableViews = tables.map((table, index) => {
+    const schemaName = table.schema?.name || 'public'
     const id = nodeId(table.schema?.name, table.name, qualify)
     return {
       id,
       name: table.name,
+      schemaName,
+      label: displayLabel(schemaName, table.name, qualify, (nameCounts.get(table.name) ?? 0) > 1),
       headerColor: normalizeColor(table.headerColor) || HEADER_PALETTE[index % HEADER_PALETTE.length],
       note: table.note || '',
       line: table.token?.start.line ?? 1,
@@ -127,6 +150,7 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
         unique: field.unique === true,
         notNull: field.not_null === true,
         increment: field.increment === true,
+        defaultValue: formatDefault(field.dbdefault),
         note: field.note || '',
         line: field.token?.start.line ?? table.token?.start.line ?? 1,
       })),
@@ -164,6 +188,8 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
       name: ref.name || '',
       color: normalizeColor(ref.color) || colorById.get(from.tableId) || '#94a3b8',
       line: ref.token?.start.line ?? 1,
+      span: spanOf(ref.token),
+      inferred: false,
       from,
       to,
       fromCard,
@@ -176,18 +202,27 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
     ...inferForeignKeyRefs(tableViews, explicitRefViews),
   ]
 
-  return {
-    tables: tableViews,
-    enums: enums.map((item) => ({
+  const enumViews = enums.map((item) => {
+    const schemaName = item.schema?.name || 'public'
+    return {
       id: nodeId(item.schema?.name, item.name, qualify),
       name: item.name,
+      schemaName,
+      label: displayLabel(schemaName, item.name, qualify, (enumNameCounts.get(item.name) ?? 0) > 1),
       line: item.token?.start.line ?? 1,
       values: (item.values ?? []).map((value) => ({
         name: value.name,
         note: value.note || '',
       })),
-    })),
+    }
+  })
+
+  return {
+    tables: tableViews,
+    enums: enumViews,
     refs: refViews,
+    enumLinks: enumLinks(tableViews, enumViews),
+    omitted: omittedConstructs(database),
   }
 }
 
@@ -215,6 +250,8 @@ function inferForeignKeyRefs(tableViews: SchemaModel['tables'], existing: Schema
         name: '',
         color: child.headerColor,
         line: field.line,
+        span: { line: field.line, column: 1, endLine: field.line, endColumn: 1 },
+        inferred: true,
         from: { tableId: child.id, fields: [field.name] },
         to: { tableId: target.id, fields: [targetField.name] },
         fromCard: { many: true, optional: !field.notNull },
@@ -239,6 +276,57 @@ function hasSameEndpoints(
     || (ref.from.tableId === toTableId && ref.from.fields.length === 1 && ref.from.fields[0] === toField
       && ref.to.tableId === fromTableId && ref.to.fields.length === 1 && ref.to.fields[0] === fromField),
   )
+}
+
+function displayLabel(schemaName: string, name: string, qualify: boolean, duplicate: boolean): string {
+  if (qualify || duplicate) return schemaName === 'public' ? name : `${schemaName}.${name}`
+  return name
+}
+
+function enumLinks(tables: SchemaModel['tables'], enums: SchemaModel['enums']): SchemaModel['enumLinks'] {
+  const byName = new Map<string, string>()
+  for (const item of enums) {
+    byName.set(item.name, item.id)
+    byName.set(item.id, item.id)
+    if (item.schemaName && item.schemaName !== 'public') byName.set(`${item.schemaName}.${item.name}`, item.id)
+  }
+  const links: SchemaModel['enumLinks'] = []
+  for (const table of tables) {
+    for (const field of table.fields) {
+      const enumId = byName.get(field.typeName)
+      if (!enumId) continue
+      links.push({ id: `${table.id}.${field.name}->${enumId}`, tableId: table.id, field: field.name, enumId })
+    }
+  }
+  return links
+}
+
+function omittedConstructs(database: RawDatabase): string[] {
+  const omitted: string[] = []
+  if ((database.schemas ?? []).some((schema) => (schema.tableGroups?.length ?? 0) > 0)) omitted.push('TableGroup')
+  if (database.name || database.note || database.databaseType) omitted.push('Project')
+  if ((database.notes?.length ?? 0) > 0) omitted.push('Note')
+  return omitted
+}
+
+function spanOf(token: TokenRange | undefined): SourceSpan {
+  return {
+    line: token?.start.line ?? 1,
+    column: token?.start.column ?? 1,
+    endLine: token?.end.line ?? token?.start.line ?? 1,
+    endColumn: token?.end.column ?? (token?.start.column ?? 1) + 1,
+  }
+}
+
+function formatDefault(value: RawField['dbdefault']): string {
+  if (value == null || value === '') return ''
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (typeof value === 'object') {
+    if (value.value == null || value.value === '') return ''
+    if (value.type === 'string') return `'${value.value}'`
+    return String(value.value)
+  }
+  return ''
 }
 
 function schemaPart(id: string): string {
