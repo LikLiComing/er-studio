@@ -9,6 +9,8 @@ import { nudgeCorner, nudgeSegment, removeCorner, type BendHandle, type Box } fr
 import type { Point } from '../model/types'
 import { addRef, isRefVisible, jumpTo, moveNode, rememberLayout, selectNode, selectRef, setRoute, workspace, type RefOp } from '../workspace'
 
+const props = defineProps<{ readonly?: boolean }>()
+
 const viewport = ref<HTMLElement | null>(null)
 const world = ref<HTMLElement | null>(null)
 const sizes = reactive<Record<string, { w: number; h: number }>>({})
@@ -62,7 +64,7 @@ onMounted(async () => {
   await nextTick()
   measure()
   if (workspace.pendingFit) {
-    fit(false)
+    fit(Boolean(props.readonly))
     workspace.pendingFit = false
   }
 })
@@ -71,7 +73,7 @@ watch(() => workspace.model, async () => {
   await nextTick()
   measure()
   if (workspace.pendingFit) {
-    fit(false)
+    fit(workspace.screen === 'start')
     workspace.pendingFit = false
   }
 })
@@ -79,6 +81,14 @@ watch(() => workspace.model, async () => {
 watch(() => workspace.focusRequest, (request) => {
   if (!request) return
   centerOn(request.id, request.zoom)
+})
+
+watch(() => workspace.pendingFit, async (pending) => {
+  if (!pending) return
+  await nextTick()
+  measure()
+  fit(true)
+  workspace.pendingFit = false
 })
 
 function measure(): void {
@@ -139,6 +149,7 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onMoveStart(id: string, event: PointerEvent): void {
+  if (props.readonly) return
   selectNode(id)
   const origin = workspace.positions[id] ?? { x: 0, y: 0 }
   const startX = event.clientX
@@ -161,6 +172,7 @@ function onMoveStart(id: string, event: PointerEvent): void {
 }
 
 function onBend(payload: { key: string; refId: string; handle: BendHandle; points: Point[]; event: PointerEvent }): void {
+  if (props.readonly) return
   selectRef(payload.refId)
   const origin = clientToWorld(payload.event.clientX, payload.event.clientY)
   const snapshot = payload.points.map((point) => ({ ...point }))
@@ -193,6 +205,7 @@ function onClearBend(payload: { key: string; points: Point[]; index: number }): 
 }
 
 function onLinkStart(tableId: string, field: string, event: PointerEvent): void {
+  if (props.readonly) return
   const box = boxes.value[tableId]
   const y = fieldY[`${tableId}.${field}`] ?? 20
   const start = box

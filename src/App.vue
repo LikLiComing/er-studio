@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import DiagramCanvas from './canvas/DiagramCanvas.vue'
+import DraftPicker from './drafts/DraftPicker.vue'
+import { listDrafts, type Draft } from './drafts/store'
 import DbmlEditor from './editor/DbmlEditor.vue'
-import { backToStart, beautifyDiagram, createNew, deleteSelectedRef, dismissOmitted, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
+import { backToStart, beautifyDiagram, continueDraft, createNew, deleteSelectedRef, discardAllDrafts, discardDraft, dismissOmitted, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, previewDraft, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
 
 const canvas = ref<{ fit: () => void; zoomBy: (factor: number) => void } | null>(null)
 const splitting = ref(false)
+const pickerOpen = ref(false)
+const drafts = ref<Draft[]>([])
+const pickerId = ref('')
 
 const issueText = computed(() => {
   const issue = workspace.issues[0]
@@ -26,6 +31,61 @@ const omittedText = computed(() => {
   if (workspace.omittedDismissed || workspace.model.omitted.length === 0) return ''
   return `文件含有 ${workspace.model.omitted.join('、')}，图上未画出`
 })
+
+onMounted(() => {
+  openPickerIfAny()
+})
+
+function openPickerIfAny(): void {
+  drafts.value = listDrafts()
+  if (drafts.value.length === 0) return
+  pickerId.value = drafts.value[0].id
+  previewDraft(pickerId.value)
+  pickerOpen.value = true
+}
+
+function enterWorkspace(): void {
+  if (listDrafts().length === 0) {
+    createNew()
+    return
+  }
+  openPickerIfAny()
+}
+
+function selectPicked(id: string): void {
+  pickerId.value = id
+  previewDraft(id)
+}
+
+function editPicked(): void {
+  if (!continueDraft(pickerId.value)) return
+  pickerOpen.value = false
+}
+
+function discardPicked(): void {
+  drafts.value = discardDraft(pickerId.value)
+  if (drafts.value.length === 0) {
+    pickerOpen.value = false
+    return
+  }
+  pickerId.value = drafts.value[0].id
+  previewDraft(pickerId.value)
+}
+
+function clearPicked(): void {
+  if (!window.confirm('删除全部草稿？')) {
+    pickerId.value = drafts.value[0]?.id ?? ''
+    return
+  }
+  discardAllDrafts()
+  drafts.value = []
+  pickerOpen.value = false
+}
+
+function startBlank(): void {
+  pickerOpen.value = false
+  createNew()
+}
 
 function startSplit(event: PointerEvent): void {
   splitting.value = true
@@ -50,10 +110,11 @@ function startSplit(event: PointerEvent): void {
     <div class="card">
       <p class="mark">ER</p>
       <h1>数据库关系工作站</h1>
-      <p class="lede">左边写表结构，右边实时画出关系。图只保存在你自己的 DBML 文件里。</p>
+      <p class="lede">左边写表结构，右边实时画出关系。编辑会留在这个浏览器里，下次进入可以接着草稿。</p>
       <p v-if="workspace.downloadOnly" class="browser">此浏览器保存时会下载副本，不能直接写回原文件。</p>
+      <p v-if="drafts.length && !pickerOpen" class="browser">这个浏览器里有 {{ drafts.length }} 个草稿，点进入可以继续。</p>
       <div class="actions">
-        <button type="button" class="primary" @click="createNew">新建</button>
+        <button type="button" class="primary" @click="enterWorkspace">进入</button>
         <button type="button" @click="openSample">从示例开始</button>
         <button type="button" @click="openFromDevice">打开本地 DBML</button>
       </div>
@@ -104,6 +165,17 @@ function startSplit(event: PointerEvent): void {
       <span>Ln {{ workspace.cursor.line }}, Col {{ workspace.cursor.column }}</span>
     </footer>
   </div>
+  <DraftPicker
+    v-if="pickerOpen"
+    :drafts="drafts"
+    :selected-id="pickerId"
+    @select="selectPicked"
+    @edit="editPicked"
+    @discard="discardPicked"
+    @clear="clearPicked"
+    @blank="startBlank"
+    @cancel="pickerOpen = false"
+  />
 </template>
 
 <style scoped>

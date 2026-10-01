@@ -1,5 +1,7 @@
 import { Parser } from '@dbml/core'
+import { explainIssues } from './diagnostics'
 import { neutralizeOptional, type OptionalMark } from './optional'
+import { relaxFieldSyntax } from './relax'
 import { HEADER_PALETTE, type Cardinality, type ParseIssue, type ParseResult, type RefEnd, type SchemaModel, type SourceSpan } from './types'
 
 interface TokenRange {
@@ -81,6 +83,17 @@ export function parseDbml(source: string): ParseResult {
     return { ok: true, model: { tables: [], enums: [], refs: [], enumLinks: [], omitted: [] } }
   }
 
+  const primary = tryParse(source)
+  if (primary.ok) return primary
+  const relaxed = relaxFieldSyntax(source)
+  if (relaxed !== source) {
+    const second = tryParse(relaxed)
+    if (second.ok) return second
+  }
+  return { ok: false, issues: explainIssues(primary.issues, source) }
+}
+
+function tryParse(source: string): ParseResult {
   const { text, marks } = neutralizeOptional(source)
   try {
     const database = parser.parse(text, 'dbmlv2') as RawDatabase

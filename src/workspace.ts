@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { clearDrafts, deleteDraft, listDrafts, readDraft, saveDraft, type Draft } from './drafts/store'
 import { canBindDeviceFile, openDeviceFile, saveDeviceFile } from './file/device-file'
 import { appendLayout, extractLayout } from './model/layout-comment'
 import { beautifyPositions, reconcilePositions } from './model/layout'
@@ -47,6 +48,10 @@ let redoPrefersLayout = false
 const layoutUndo: LayoutSnapshot[] = []
 const layoutRedo: LayoutSnapshot[] = []
 let editorApi: EditorApi | null = null
+let draftId: string | null = null
+let draftCreatedAt = 0
+let persistTimer = 0
+let persistSuspended = false
 
 export const workspace = reactive({
   screen: 'start' as 'start' | 'editor',
@@ -83,7 +88,39 @@ export function bindEditor(api: EditorApi | null): void {
 }
 
 export function createNew(): void {
+  draftId = null
+  draftCreatedAt = 0
   openText('', '未命名.dbml', null, false)
+}
+
+export function continueDraft(id: string): boolean {
+  const draft = readDraft(id)
+  if (!draft) return false
+  loadDraft(draft, true)
+  setNote('已恢复浏览器里的草稿。保存到本地文件时需要重新选择位置')
+  return true
+}
+
+export function previewDraft(id: string): boolean {
+  const draft = readDraft(id)
+  if (!draft) return false
+  loadDraft(draft, false)
+  return true
+}
+
+export function discardDraft(id: string): Draft[] {
+  if (draftId === id) {
+    draftId = null
+    draftCreatedAt = 0
+  }
+  deleteDraft(id)
+  return listDrafts()
+}
+
+export function discardAllDrafts(): void {
+  draftId = null
+  draftCreatedAt = 0
+  clearDrafts()
 }
 
 export function openSample(): void {
@@ -95,6 +132,7 @@ export async function openFromDevice(): Promise<void> {
   const picked = await openDeviceFile()
   if (!picked) return
   openText(picked.text, picked.name, picked.handle, false)
+  rememberOpened()
 }
 
 export async function save(saveAs = false): Promise<void> {
@@ -107,6 +145,7 @@ export async function save(saveAs = false): Promise<void> {
     workspace.fileName = saved.name
     workspace.boundToDevice = Boolean(saved.handle)
     workspace.dirty = false
+    schedulePersist()
     setNote(saved.downloaded ? '已下载副本' : '已保存')
   } catch (error) {
     setNote(error instanceof Error ? `保存失败：${error.message}` : '保存失败')
@@ -115,6 +154,7 @@ export async function save(saveAs = false): Promise<void> {
 
 export function backToStart(): void {
   if (workspace.dirty && !confirmDiscard()) return
+  persistDraft()
   workspace.screen = 'start'
   workspace.dirty = false
 }
@@ -125,6 +165,7 @@ export function setDbmlFromEditor(text: string): void {
   workspace.dirty = true
   if (!restoring) undoOwner = 'text'
   scheduleParse()
+  schedulePersist()
 }
 
 export function selectNode(id: string | null): void {
@@ -166,12 +207,14 @@ export function isRefVisible(ref: RefView): boolean {
 export function moveNode(id: string, x: number, y: number): void {
   workspace.positions[id] = { x, y }
   workspace.dirty = true
+  schedulePersist()
 }
 
 export function setRoute(id: string, points: Point[]): void {
   if (points.length === 0) delete workspace.routes[id]
   else workspace.routes[id] = points
   workspace.dirty = true
+  schedulePersist()
 }
 
 export function rememberLayout(): void {
@@ -191,6 +234,7 @@ export function beautifyDiagram(): void {
   workspace.selectedId = null
   workspace.selectedRefId = null
   workspace.dirty = true
+  schedulePersist()
   setNote('已按关联关系重新排版')
 }
 
@@ -228,6 +272,7 @@ export function deleteSelectedRef(): void {
     if (!workspace.hiddenInferences.includes(key)) workspace.hiddenInferences.push(key)
     workspace.selectedRefId = null
     workspace.dirty = true
+    schedulePersist()
     setNote('已隐藏这条推断关系')
     return
   }
@@ -306,7 +351,70 @@ export function redoChange(): boolean {
   return false
 }
 
-function openText(text: string, name: string, handle: FileSystemFileHandle | null, dirty: boolean): void {
+function loadDraft(draft: Draft, asSession: boolean): void {
+  persistSuspended = true
+  openText(draft.dbml, draft.fileName || '未命名.dbml', null, asSession, false)
+  workspace.positions = reconcilePositions(draft.positions ?? {}, workspace.model)
+  workspace.routes = draft.routes ?? {}
+  workspace.hiddenInferences = draft.hiddenInferences ?? []
+  workspace.zoom = draft.zoom || 1
+  workspace.pan = draft.pan ?? { x: 40, y: 32 }
+  if (draft.editorWidth) workspace.editorWidth = draft.editorWidth
+  workspace.pendingFit = true
+  if (asSession) {
+    draftId = draft.id
+    draftCreatedAt = draft.createdAt || draft.updatedAt
+    workspace.screen = 'editor'
+    workspace.dirty = true
+  } else {
+    draftId = null
+    draftCreatedAt = 0
+    workspace.screen = 'start'
+    workspace.dirty = false
+  }
+  persistSuspended = false
+}
+
+function rememberOpened(): void {
+  draftId = newDraftId()
+  draftCreatedAt = Date.now()
+  persistDraft()
+}
+
+function schedulePersist(): void {
+  if (persistSuspended || workspace.screen !== 'editor') return
+  window.clearTimeout(persistTimer)
+  persistTimer = window.setTimeout(persistDraft, 400)
+}
+
+function persistDraft(): void {
+  if (persistSuspended || typeof localStorage === 'undefined') return
+  if (!draftId && !workspace.dirty) return
+  if (!workspace.dbml.trim() && !workspace.dirty) return
+  if (!draftId) {
+    draftId = newDraftId()
+    draftCreatedAt = Date.now()
+  }
+  try {
+    saveDraft({
+      id: draftId,
+      fileName: workspace.fileName,
+      dbml: workspace.dbml,
+      positions: { ...workspace.positions },
+      routes: { ...workspace.routes },
+      hiddenInferences: [...workspace.hiddenInferences],
+      createdAt: draftCreatedAt,
+      updatedAt: Date.now(),
+      zoom: workspace.zoom,
+      pan: { ...workspace.pan },
+      editorWidth: workspace.editorWidth,
+    })
+  } catch {
+    setNote('浏览器草稿写满了，这次没能自动留下')
+  }
+}
+
+function openText(text: string, name: string, handle: FileSystemFileHandle | null, dirty: boolean, fit = true): void {
   const extracted = extractLayout(text)
   fileHandle = handle
   layoutUndo.length = 0
@@ -327,7 +435,7 @@ function openText(text: string, name: string, handle: FileSystemFileHandle | nul
   workspace.pan = { x: 40, y: 32 }
   workspace.editorVisible = true
   workspace.editorWidth = Math.round(Math.min(560, Math.max(320, window.innerWidth * 0.38)))
-  workspace.pendingFit = true
+  workspace.pendingFit = fit
   workspace.pendingSelectLine = 0
   workspace.omittedDismissed = false
   workspace.externalRev += 1
@@ -431,6 +539,7 @@ function restoreLayout(snapshot: LayoutSnapshot): void {
   workspace.hiddenInferences = snapshot.hiddenInferences
   workspace.dirty = true
   restoring = false
+  schedulePersist()
   const selected = selectedRef()
   if (selected && !isRefVisible(selected)) workspace.selectedRefId = null
 }
@@ -461,6 +570,11 @@ function editorRedo(): boolean {
   const before = editorApi.getValue()
   editorApi.redo()
   return editorApi.getValue() !== before
+}
+
+function newDraftId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `draft-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
 function confirmDiscard(): boolean {
@@ -518,6 +632,7 @@ export function installWindowGuards(): () => void {
     }
   }
   const onLeave = (event: BeforeUnloadEvent) => {
+    persistDraft()
     if (workspace.screen === 'editor' && workspace.dirty) {
       event.preventDefault()
       event.returnValue = ''
@@ -525,8 +640,10 @@ export function installWindowGuards(): () => void {
   }
   window.addEventListener('keydown', onKey, true)
   window.addEventListener('beforeunload', onLeave)
+  window.addEventListener('pagehide', persistDraft)
   return () => {
     window.removeEventListener('keydown', onKey, true)
     window.removeEventListener('beforeunload', onLeave)
+    window.removeEventListener('pagehide', persistDraft)
   }
 }

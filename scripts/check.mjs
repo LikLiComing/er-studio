@@ -53,6 +53,15 @@ if (optional.ok) {
 const broken = parseMod.parseDbml('Table {')
 check('syntax error', !broken.ok && broken.issues[0].line === 1)
 
+const trailingComma = parseMod.parseDbml('Table users {\n  id int [pk]\n  phone varchar,\n}')
+check('trailing comma field', trailingComma.ok && trailingComma.model.tables[0].fields.some((field) => field.name === 'phone'))
+
+const stuckBracket = parseMod.parseDbml('Table users {\n  id int [pk]\n  phone varchar[not null]\n}')
+check('space before settings', stuckBracket.ok && stuckBracket.model.tables[0].fields.find((field) => field.name === 'phone')?.notNull)
+
+const missingType = parseMod.parseDbml('Table users {\n  id\n}')
+check('missing type in Chinese', !missingType.ok && missingType.issues[0].message.includes('类型'))
+
 const round = layoutMod.appendLayout('Table users {\n  id int\n}', { users: { x: 80.2, y: 40 } }, {}, ['orders.user_id->users.id'])
 const extracted = layoutMod.extractLayout(round)
 check('layout roundtrip', extracted.positions.users.x === 80 && extracted.dbml.includes('Table users'))
