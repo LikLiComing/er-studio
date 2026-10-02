@@ -26,11 +26,13 @@ function submit(): void {
 </script>
 
 <template>
-  <div class="picker type-picker" :style="{ left: `${x}px`, top: `${y}px` }" @pointerdown.stop>
+  <Teleport to="body">
+  <div class="picker type-picker" :style="{ left: `${x}px`, top: `${y}px` }" @pointerdown.stop @click.stop>
     <input v-model="draft" class="input" placeholder="类型" @keydown.enter.prevent="submit" @keydown.esc.prevent="emit('close')">
     <button v-for="item in filtered.slice(0, 12)" :key="item" type="button" class="item" @click="emit('pick', item)">{{ item }}</button>
     <button type="button" class="item apply" @click="submit">确定</button>
   </div>
+  </Teleport>
 </template>
 
 <style scoped>
