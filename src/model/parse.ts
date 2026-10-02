@@ -1,5 +1,5 @@
-import { Parser } from '@dbml/core'
 import { explainIssues } from './diagnostics'
+import { ensureParser, getParser, parserReady } from './parser-loader'
 import { neutralizeOptional, type OptionalMark } from './optional'
 import { relaxFieldSyntax } from './relax'
 import { HEADER_PALETTE, type Cardinality, type ParseIssue, type ParseResult, type RefEnd, type SchemaModel, type SourceSpan } from './types'
@@ -31,6 +31,7 @@ interface RawField {
 interface RawIndex {
   name?: string
   unique?: boolean
+  pk?: boolean
   columns?: { value?: string }[]
 }
 
@@ -56,6 +57,14 @@ interface RawRef {
   color?: string
   token?: TokenRange
   endpoints?: RawEndpoint[]
+  onDelete?: string | null
+  onUpdate?: string | null
+}
+
+interface RawAlias {
+  name: string
+  kind?: string
+  value?: { tableName?: string; elementName?: string; schemaName?: string | null }
 }
 
 interface RawSchema {
@@ -73,11 +82,20 @@ interface RawDatabase {
   note?: string
   databaseType?: string
   notes?: unknown[]
+  aliases?: RawAlias[]
 }
 
-const parser = new Parser()
+export { ensureParser, parserReady } from './parser-loader'
 
 export function parseDbml(source: string): ParseResult {
+  if (!parserReady()) {
+    void ensureParser().then(() => {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('er-studio-parser-ready'))
+      }
+    })
+    return { ok: true, model: { tables: [], enums: [], refs: [], enumLinks: [], omitted: [] } }
+  }
   const trimmed = source.trim()
   if (!trimmed) {
     return { ok: true, model: { tables: [], enums: [], refs: [], enumLinks: [], omitted: [] } }
@@ -96,7 +114,7 @@ export function parseDbml(source: string): ParseResult {
 function tryParse(source: string): ParseResult {
   const { text, marks } = neutralizeOptional(source)
   try {
-    const database = parser.parse(text, 'dbmlv2') as RawDatabase
+    const database = getParser().parse(text, 'dbmlv2') as RawDatabase
     return { ok: true, model: toModel(database, text, marks) }
   } catch (error) {
     return { ok: false, issues: readIssues(error) }
@@ -136,6 +154,7 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
   const schemas = database.schemas ?? []
   const schemaNames = new Set(schemas.map((schema) => schema.name || 'public'))
   const qualify = schemaNames.size > 1
+  const aliasMap = buildAliasMap(database, qualify)
   const tables = schemas.flatMap((schema) => schema.tables ?? [])
   const enums = schemas.flatMap((schema) => schema.enums ?? [])
   const refs = schemas.flatMap((schema) => schema.refs ?? [])
@@ -148,6 +167,13 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
   const tableViews = tables.map((table, index) => {
     const schemaName = table.schema?.name || 'public'
     const id = nodeId(table.schema?.name, table.name, qualify)
+    const pkColumns = new Set<string>()
+    for (const index of table.indexes ?? []) {
+      if (!index.pk) continue
+      for (const column of index.columns ?? []) {
+        if (column.value) pkColumns.add(column.value)
+      }
+    }
     return {
       id,
       name: table.name,
@@ -159,7 +185,7 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
       fields: (table.fields ?? []).map((field) => ({
         name: field.name,
         typeName: typeName(field.type),
-        pk: field.pk === true,
+        pk: field.pk === true || pkColumns.has(field.name),
         unique: field.unique === true,
         notNull: field.not_null === true,
         increment: field.increment === true,
@@ -169,6 +195,7 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
       })),
       indexes: (table.indexes ?? []).map((index) => ({
         label: indexLabel(index),
+        pk: index.pk === true,
       })),
     }
   })
@@ -186,13 +213,17 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
   const explicitRefViews = refs.flatMap((ref, index) => {
     const endpoints = ref.endpoints ?? []
     if (endpoints.length < 2) return []
-    const sides = sourceSides(source, ref.token, endpoints, qualify)
+    const sides = sourceSides(source, ref.token, endpoints, qualify, aliasMap)
     if (!sides) return []
     const mark = markFor(ref.token, marks)
-    const fromOptional = mark ? mark.left : inferredOptional(sides.left, sides.right, fieldByKey, qualify)
-    const toOptional = mark ? mark.right : inferredOptional(sides.right, sides.left, fieldByKey, qualify)
-    const from = endOf(sides.left, qualify)
-    const to = endOf(sides.right, qualify)
+    let fromOptional = mark ? mark.left : inferredOptional(sides.left, sides.right, fieldByKey, qualify)
+    let toOptional = mark ? mark.right : inferredOptional(sides.right, sides.left, fieldByKey, qualify)
+    if (mark?.op === '<') {
+      fromOptional = mark.right
+      toOptional = mark.left
+    }
+    const from = endOf(sides.left, qualify, aliasMap)
+    const to = endOf(sides.right, qualify, aliasMap)
     if (!from || !to) return []
     const fromCard: Cardinality = { many: sides.left.relation === '*', optional: fromOptional }
     const toCard: Cardinality = { many: sides.right.relation === '*', optional: toOptional }
@@ -207,6 +238,8 @@ function toModel(database: RawDatabase, source: string, marks: OptionalMark[]): 
       to,
       fromCard,
       toCard,
+      onDelete: ref.onDelete || '',
+      onUpdate: ref.onUpdate || '',
     }]
   })
 
@@ -269,6 +302,8 @@ function inferForeignKeyRefs(tableViews: SchemaModel['tables'], existing: Schema
         to: { tableId: target.id, fields: [targetField.name] },
         fromCard: { many: true, optional: !field.notNull },
         toCard: { many: false, optional: false },
+        onDelete: '',
+        onUpdate: '',
       })
     }
   }
@@ -359,11 +394,23 @@ function foreignKeyTargets(prefix: string, tableName: string): boolean {
   return expected === name.slice(0, -1)
 }
 
+function buildAliasMap(database: RawDatabase, qualify: boolean): Map<string, string> {
+  const map = new Map<string, string>()
+  for (const alias of database.aliases ?? []) {
+    if (alias.kind && alias.kind !== 'table') continue
+    const tableName = alias.value?.tableName || alias.value?.elementName
+    if (!tableName) continue
+    map.set(alias.name, nodeId(alias.value?.schemaName, tableName, qualify))
+  }
+  return map
+}
+
 function sourceSides(
   source: string,
   token: TokenRange | undefined,
   endpoints: RawEndpoint[],
   qualify: boolean,
+  aliasMap: Map<string, string>,
 ): { left: RawEndpoint; right: RawEndpoint } | null {
   if (!token) {
     return { left: endpoints[0], right: endpoints[1] }
@@ -372,24 +419,48 @@ function sourceSides(
   const found = findOperator(slice)
   if (!found) return { left: endpoints[0], right: endpoints[1] }
   const leftText = slice.slice(0, found.index)
-  const rightText = slice.slice(found.index + found.op.length)
+  const rightText = slice.slice(found.end)
   const right = endpoints.find((endpoint) => mentions(rightText, endpoint))
   const left = endpoints.find((endpoint) => endpoint !== right && mentions(leftText, endpoint))
     ?? endpoints.find((endpoint) => endpoint !== right)
   if (!left || !right) return null
-  void qualify
   return { left, right }
 }
 
 function mentions(text: string, endpoint: RawEndpoint): boolean {
-  if (!text.includes(endpoint.tableName)) return false
-  return endpoint.fieldNames.every((field) => text.includes(field))
+  const names = endpointNames(endpoint)
+  if (!names.some((name) => containsTable(text, name))) return false
+  return endpoint.fieldNames.every((field) => containsField(text, field))
 }
 
-function endOf(endpoint: RawEndpoint, qualify: boolean): RefEnd | null {
+function endpointNames(endpoint: RawEndpoint): string[] {
+  const names = [endpoint.tableName]
+  if (endpoint.schemaName) names.push(`${endpoint.schemaName}.${endpoint.tableName}`)
+  return names.filter(Boolean)
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function containsTable(text: string, name: string): boolean {
+  if (!name) return false
+  const escaped = escapeRegExp(name).replace(/\./g, '\\.')
+  return new RegExp(`(?:^|[^A-Za-z0-9_])${escaped}(?:\\.|[^A-Za-z0-9_]|$)`).test(text)
+}
+
+function containsField(text: string, field: string): boolean {
+  if (!field) return false
+  const escaped = escapeRegExp(field)
+  return new RegExp(`\\.${escaped}(?=[^\\w]|$)`).test(text)
+    || new RegExp(`(^|[^\\w.])${escaped}(?=[^\\w]|$)`).test(text)
+}
+
+function endOf(endpoint: RawEndpoint, qualify: boolean, aliasMap: Map<string, string>): RefEnd | null {
   if (!endpoint.tableName || endpoint.fieldNames.length === 0) return null
+  const tableId = aliasMap.get(endpoint.tableName) ?? nodeId(endpoint.schemaName, endpoint.tableName, qualify)
   return {
-    tableId: nodeId(endpoint.schemaName, endpoint.tableName, qualify),
+    tableId,
     fields: [...endpoint.fieldNames],
   }
 }
@@ -431,10 +502,32 @@ function sliceToken(source: string, token: TokenRange): string {
   return chunks.join('\n')
 }
 
-function findOperator(slice: string): { index: number; op: string } | null {
-  const match = slice.match(/<>|<|>|-/)
-  if (!match || match.index === undefined) return null
-  return { index: match.index, op: match[0] }
+function findOperator(slice: string): { index: number; op: string; end: number } | null {
+  for (let index = 0; index < slice.length; index += 1) {
+    const start = index
+    while (slice[index] === '?') index += 1
+    const char = slice[index]
+    if (char === '<' && slice[index + 1] === '>') {
+      let end = index + 2
+      while (slice[end] === '?') end += 1
+      return { index: start, op: '<>', end }
+    }
+    if (char === '<' || char === '>') {
+      let end = index + 1
+      while (slice[end] === '?') end += 1
+      return { index: start, op: char, end }
+    }
+    if (char === '-') {
+      const before = slice[index - 1] ?? ' '
+      const after = slice[index + 1] ?? ' '
+      if (!/[A-Za-z0-9_]/.test(before) && !/[A-Za-z0-9_]/.test(after)) {
+        let end = index + 1
+        while (slice[end] === '?') end += 1
+        return { index: start, op: '-', end }
+      }
+    }
+  }
+  return null
 }
 
 function nodeId(schemaName: string | null | undefined, name: string, qualify: boolean): string {
@@ -453,7 +546,8 @@ function indexLabel(index: RawIndex): string {
   const columns = (index.columns ?? []).map((column) => column.value || '').filter(Boolean).join(', ')
   const name = index.name ? `${index.name}: ` : ''
   const unique = index.unique ? ' unique' : ''
-  return `${name}${columns}${unique}`
+  const pk = index.pk ? ' pk' : ''
+  return `${name}${columns}${pk}${unique}`
 }
 
 function normalizeColor(value: string | undefined): string {

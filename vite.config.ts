@@ -12,6 +12,16 @@ export default defineConfig(({ mode }) => ({
     include: ['monaco-editor'],
   },
   build: {
-    chunkSizeWarningLimit: 4000,
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/monaco-editor')) return 'monaco'
+          if (id.includes('node_modules/@dbml/core')) return 'dbml-core'
+          if (id.includes('node_modules/@dbml/parse')) return 'dbml-parse'
+          if (id.includes('node_modules/vue')) return 'vue'
+        },
+      },
+    },
   },
 }))

@@ -1,9 +1,17 @@
 import { reactive } from 'vue'
 import { clearDrafts, deleteDraft, listDrafts, readDraft, saveDraft, type Draft } from './drafts/store'
 import { canBindDeviceFile, openDeviceFile, saveDeviceFile } from './file/device-file'
+import {
+  defaultSheet,
+  parseDocumentFile,
+  serializeDocumentFile,
+  type DocumentSnapshot,
+  type SheetSnapshot,
+} from './model/document-io'
 import { appendLayout, extractLayout } from './model/layout-comment'
+import { ensureParser } from './model/parser-loader'
 import { beautifyPositions, reconcilePositions } from './model/layout'
-import { dbmlIdent, inferenceKey, locateNode, parseDbml, refOperator } from './model/parse'
+import { dbmlIdent, inferenceKey, locateNode, parseDbml, parserReady, refOperator } from './model/parse'
 import { routeKey } from './model/route'
 import { SAMPLE_DBML } from './model/sample'
 import { applySpan, deleteRange, insertBlock, type TextSpan } from './model/text-edit'
@@ -35,6 +43,7 @@ interface EditorApi {
   undo: () => void
   redo: () => void
   getValue: () => string
+  switchSheet: (sheetId: string, text: string) => void
 }
 
 let fileHandle: FileSystemFileHandle | null = null
@@ -45,8 +54,8 @@ let jumpNonce = 0
 let restoring = false
 let undoOwner: 'layout' | 'text' = 'text'
 let redoPrefersLayout = false
-const layoutUndo: LayoutSnapshot[] = []
-const layoutRedo: LayoutSnapshot[] = []
+const layoutUndoBySheet = new Map<string, LayoutSnapshot[]>()
+const layoutRedoBySheet = new Map<string, LayoutSnapshot[]>()
 let editorApi: EditorApi | null = null
 let draftId: string | null = null
 let draftCreatedAt = 0
@@ -81,6 +90,8 @@ export const workspace = reactive({
   pendingFit: false,
   pendingSelectLine: 0,
   statusNote: '',
+  sheets: [] as SheetSnapshot[],
+  activeSheetId: '',
 })
 
 export function bindEditor(api: EditorApi | null): void {
@@ -136,7 +147,8 @@ export async function openFromDevice(): Promise<void> {
 }
 
 export async function save(saveAs = false): Promise<void> {
-  const text = appendLayout(workspace.dbml, visiblePositions(), visibleRoutes(), [...workspace.hiddenInferences])
+  syncActiveSheet()
+  const text = serializeDocumentFile(currentDocument())
   const suggested = workspace.fileName || 'diagram.dbml'
   try {
     const saved = await saveDeviceFile(saveAs ? null : fileHandle, suggested, text, saveAs)
@@ -219,9 +231,10 @@ export function setRoute(id: string, points: Point[]): void {
 
 export function rememberLayout(): void {
   if (restoring) return
-  layoutUndo.push(captureLayout())
-  if (layoutUndo.length > 50) layoutUndo.shift()
-  layoutRedo.length = 0
+  const undo = layoutUndoStack()
+  undo.push(captureLayout())
+  if (undo.length > 50) undo.shift()
+  layoutRedoStack().length = 0
   undoOwner = 'layout'
   redoPrefersLayout = false
 }
@@ -309,6 +322,8 @@ export function toggleEditor(): void {
 }
 
 export function undoChange(): boolean {
+  const layoutUndo = layoutUndoStack()
+  const layoutRedo = layoutRedoStack()
   if (undoOwner === 'layout' && layoutUndo.length > 0) {
     undoLayout()
     redoPrefersLayout = true
@@ -331,6 +346,7 @@ export function undoChange(): boolean {
 }
 
 export function redoChange(): boolean {
+  const layoutRedo = layoutRedoStack()
   if (redoPrefersLayout && layoutRedo.length > 0) {
     redoLayout()
     undoOwner = 'layout'
@@ -353,10 +369,10 @@ export function redoChange(): boolean {
 
 function loadDraft(draft: Draft, asSession: boolean): void {
   persistSuspended = true
-  openText(draft.dbml, draft.fileName || '未命名.dbml', null, asSession, false)
-  workspace.positions = reconcilePositions(draft.positions ?? {}, workspace.model)
-  workspace.routes = draft.routes ?? {}
-  workspace.hiddenInferences = draft.hiddenInferences ?? []
+  const doc: DocumentSnapshot = draft.sheets && draft.sheets.length > 0
+    ? { sheets: draft.sheets.map(cloneSheet), activeSheetId: draft.activeSheetId || draft.sheets[0].id }
+    : parseDocumentFile(appendLayout(draft.dbml, draft.positions ?? {}, draft.routes ?? {}, draft.hiddenInferences ?? []))
+  openDocument(doc, draft.fileName || '未命名.dbml', null, asSession, false)
   workspace.zoom = draft.zoom || 1
   workspace.pan = draft.pan ?? { x: 40, y: 32 }
   if (draft.editorWidth) workspace.editorWidth = draft.editorWidth
@@ -396,13 +412,17 @@ function persistDraft(): void {
     draftCreatedAt = Date.now()
   }
   try {
+    syncActiveSheet()
+    const active = activeSheet()
     saveDraft({
       id: draftId,
       fileName: workspace.fileName,
-      dbml: workspace.dbml,
-      positions: { ...workspace.positions },
-      routes: { ...workspace.routes },
-      hiddenInferences: [...workspace.hiddenInferences],
+      dbml: active?.dbml ?? workspace.dbml,
+      positions: { ...(active?.positions ?? workspace.positions) },
+      routes: { ...(active?.routes ?? workspace.routes) },
+      hiddenInferences: [...(active?.hiddenInferences ?? workspace.hiddenInferences)],
+      sheets: workspace.sheets.map(cloneSheet),
+      activeSheetId: workspace.activeSheetId,
       createdAt: draftCreatedAt,
       updatedAt: Date.now(),
       zoom: workspace.zoom,
@@ -415,18 +435,19 @@ function persistDraft(): void {
 }
 
 function openText(text: string, name: string, handle: FileSystemFileHandle | null, dirty: boolean, fit = true): void {
-  const extracted = extractLayout(text)
+  openDocument(parseDocumentFile(text), name, handle, dirty, fit)
+}
+
+function openDocument(doc: DocumentSnapshot, name: string, handle: FileSystemFileHandle | null, dirty: boolean, fit = true): void {
   fileHandle = handle
-  layoutUndo.length = 0
-  layoutRedo.length = 0
+  layoutUndoBySheet.clear()
+  layoutRedoBySheet.clear()
   undoOwner = 'text'
   redoPrefersLayout = false
   workspace.fileName = name
   workspace.boundToDevice = Boolean(handle)
-  workspace.dbml = extracted.dbml
-  workspace.positions = extracted.positions
-  workspace.routes = extracted.routes
-  workspace.hiddenInferences = extracted.hiddenInferences
+  workspace.sheets = doc.sheets.length > 0 ? doc.sheets.map(cloneSheet) : [defaultSheet()]
+  workspace.activeSheetId = doc.activeSheetId || workspace.sheets[0].id
   workspace.dirty = dirty
   workspace.screen = 'editor'
   workspace.selectedId = null
@@ -438,9 +459,135 @@ function openText(text: string, name: string, handle: FileSystemFileHandle | nul
   workspace.pendingFit = fit
   workspace.pendingSelectLine = 0
   workspace.omittedDismissed = false
-  workspace.externalRev += 1
   workspace.statusNote = ''
+  void ensureParser().finally(() => runParse())
+  applyActiveSheet(fit)
+}
+
+function applyActiveSheet(fit: boolean): void {
+  const sheet = activeSheet()
+  if (!sheet) return
+  restoring = true
+  workspace.dbml = sheet.dbml
+  workspace.positions = { ...sheet.positions }
+  workspace.routes = { ...sheet.routes }
+  workspace.hiddenInferences = [...sheet.hiddenInferences]
+  restoring = false
+  workspace.externalRev += 1
+  editorApi?.switchSheet(sheet.id, sheet.dbml)
   runParse()
+  if (fit) workspace.pendingFit = true
+}
+
+function syncActiveSheet(): void {
+  const sheet = activeSheet()
+  if (!sheet) return
+  sheet.dbml = editorApi?.getValue() ?? workspace.dbml
+  sheet.positions = { ...workspace.positions }
+  sheet.routes = { ...workspace.routes }
+  sheet.hiddenInferences = [...workspace.hiddenInferences]
+}
+
+function activeSheet(): SheetSnapshot | undefined {
+  return workspace.sheets.find((sheet) => sheet.id === workspace.activeSheetId) ?? workspace.sheets[0]
+}
+
+function currentDocument(): DocumentSnapshot {
+  return { sheets: workspace.sheets.map(cloneSheet), activeSheetId: workspace.activeSheetId }
+}
+
+function cloneSheet(sheet: SheetSnapshot): SheetSnapshot {
+  return {
+    id: sheet.id,
+    name: sheet.name,
+    dbml: sheet.dbml,
+    positions: { ...sheet.positions },
+    routes: Object.fromEntries(Object.entries(sheet.routes).map(([id, points]) => [id, points.map((point) => ({ ...point }))])),
+    hiddenInferences: [...sheet.hiddenInferences],
+  }
+}
+
+function layoutUndoStack(): LayoutSnapshot[] {
+  const id = workspace.activeSheetId || 'default'
+  let stack = layoutUndoBySheet.get(id)
+  if (!stack) {
+    stack = []
+    layoutUndoBySheet.set(id, stack)
+  }
+  return stack
+}
+
+function layoutRedoStack(): LayoutSnapshot[] {
+  const id = workspace.activeSheetId || 'default'
+  let stack = layoutRedoBySheet.get(id)
+  if (!stack) {
+    stack = []
+    layoutRedoBySheet.set(id, stack)
+  }
+  return stack
+}
+
+export function switchSheet(id: string): void {
+  if (id === workspace.activeSheetId) return
+  syncActiveSheet()
+  workspace.activeSheetId = id
+  layoutUndoStack().length = 0
+  layoutRedoStack().length = 0
+  undoOwner = 'text'
+  redoPrefersLayout = false
+  workspace.selectedId = null
+  workspace.selectedRefId = null
+  applyActiveSheet(true)
+  workspace.dirty = true
+  schedulePersist()
+}
+
+export function addSheet(): void {
+  syncActiveSheet()
+  const index = workspace.sheets.length + 1
+  const sheet = defaultSheet(`页 ${index}`)
+  workspace.sheets.push(sheet)
+  switchSheet(sheet.id)
+  setNote('已添加新页')
+}
+
+export function renameSheet(id: string, name: string): void {
+  const sheet = workspace.sheets.find((item) => item.id === id)
+  if (!sheet) return
+  const trimmed = name.trim()
+  sheet.name = trimmed || sheet.name
+  workspace.dirty = true
+  schedulePersist()
+}
+
+export function deleteSheet(id: string): void {
+  if (workspace.sheets.length <= 1) return
+  const sheet = workspace.sheets.find((item) => item.id === id)
+  if (!sheet) return
+  if (!window.confirm(`删除「${sheet.name}」？此页内容将无法恢复。`)) return
+  syncActiveSheet()
+  workspace.sheets = workspace.sheets.filter((item) => item.id !== id)
+  layoutUndoBySheet.delete(id)
+  layoutRedoBySheet.delete(id)
+  if (workspace.activeSheetId === id) {
+    workspace.activeSheetId = workspace.sheets[0].id
+    applyActiveSheet(true)
+  }
+  workspace.dirty = true
+  schedulePersist()
+  setNote('已删除页面')
+}
+
+export function reorderSheets(fromIndex: number, toIndex: number): void {
+  if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return
+  if (fromIndex >= workspace.sheets.length || toIndex >= workspace.sheets.length) return
+  syncActiveSheet()
+  const next = [...workspace.sheets]
+  const [moved] = next.splice(fromIndex, 1)
+  next.splice(toIndex, 0, moved)
+  workspace.sheets = next
+  workspace.dirty = true
+  schedulePersist()
 }
 
 function scheduleParse(): void {
@@ -449,6 +596,7 @@ function scheduleParse(): void {
 }
 
 function runParse(): void {
+  if (!parserReady()) return
   const text = workspace.dbml
   const result = parseDbml(text)
   if (text !== workspace.dbml) return
@@ -545,6 +693,8 @@ function restoreLayout(snapshot: LayoutSnapshot): void {
 }
 
 function undoLayout(): void {
+  const layoutUndo = layoutUndoStack()
+  const layoutRedo = layoutRedoStack()
   const prev = layoutUndo.pop()
   if (!prev) return
   layoutRedo.push(captureLayout())
@@ -552,6 +702,8 @@ function undoLayout(): void {
 }
 
 function redoLayout(): void {
+  const layoutUndo = layoutUndoStack()
+  const layoutRedo = layoutRedoStack()
   const next = layoutRedo.pop()
   if (!next) return
   layoutUndo.push(captureLayout())
@@ -641,9 +793,29 @@ export function installWindowGuards(): () => void {
   window.addEventListener('keydown', onKey, true)
   window.addEventListener('beforeunload', onLeave)
   window.addEventListener('pagehide', persistDraft)
+  const onParserReady = () => runParse()
+  window.addEventListener('er-studio-parser-ready', onParserReady)
   return () => {
     window.removeEventListener('keydown', onKey, true)
     window.removeEventListener('beforeunload', onLeave)
     window.removeEventListener('pagehide', persistDraft)
+    window.removeEventListener('er-studio-parser-ready', onParserReady)
   }
+}
+
+export async function exportCurrentSql(dialect: 'postgres' | 'mysql'): Promise<string> {
+  syncActiveSheet()
+  const { exportSql } = await import('./model/sql-exchange')
+  return exportSql(workspace.dbml, dialect)
+}
+
+export async function importSqlAsNewSheet(sql: string, dialect: 'postgres' | 'mysql'): Promise<void> {
+  const { importSql } = await import('./model/sql-exchange')
+  const dbml = await importSql(sql, dialect)
+  syncActiveSheet()
+  const sheet = defaultSheet(`SQL 页 ${workspace.sheets.length + 1}`)
+  sheet.dbml = `${dbml.trim()}\n`
+  workspace.sheets.push(sheet)
+  switchSheet(sheet.id)
+  setNote('已从 SQL 导入到新页')
 }

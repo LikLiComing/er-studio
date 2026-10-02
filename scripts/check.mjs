@@ -7,6 +7,7 @@ const server = await createServer({
 })
 
 const parseMod = await server.ssrLoadModule('/src/model/parse.ts')
+await parseMod.ensureParser()
 const layoutMod = await server.ssrLoadModule('/src/model/layout-comment.ts')
 const optionalMod = await server.ssrLoadModule('/src/model/optional.ts')
 const sampleMod = await server.ssrLoadModule('/src/model/sample.ts')
@@ -104,6 +105,59 @@ check('lone ref setting removed', onlyNext.trim() === 'user_id int', JSON.string
 const neutralized = optionalMod.neutralizeOptional("Ref: a.b >? c.d\nNote: 'keep ? intact'")
 check('question in string kept', neutralized.text.includes("'keep ? intact'"))
 check('operator question removed', !neutralized.text.includes('>?') && neutralized.marks.length === 1)
+
+const hyphenRef = parseMod.parseDbml(`
+Table users { id int [pk] }
+Table posts { author int }
+Ref "fk-posts-users": posts.author >? users.id
+`)
+if (hyphenRef.ok) {
+  const ref = hyphenRef.model.refs[0]
+  check('hyphenated ref name keeps operator', Boolean(ref && ref.toCard.optional && ref.from.tableId === 'posts' && ref.to.tableId === 'users'))
+} else {
+  check('hyphenated ref name keeps operator', false, JSON.stringify(hyphenRef.issues))
+}
+
+const substringRef = parseMod.parseDbml(`
+Table user { id int [pk] }
+Table user_roles { uid int [pk] }
+Ref: user.id <? user_roles.uid
+`)
+if (substringRef.ok) {
+  const ref = substringRef.model.refs[0]
+  check('ref endpoints avoid substring match', Boolean(ref && ref.from.tableId === 'user' && ref.to.tableId === 'user_roles' && ref.fromCard.optional))
+} else {
+  check('ref endpoints avoid substring match', false, JSON.stringify(substringRef.issues))
+}
+
+const aliasRef = parseMod.parseDbml(`
+Table users as U { id int [pk] }
+Table posts { uid int }
+Ref: posts.uid > U.id
+`)
+check('table alias ref resolves', aliasRef.ok && aliasRef.model.refs.some((ref) => ref.to.tableId === 'users'), aliasRef.ok ? '' : JSON.stringify(aliasRef.issues))
+
+const compositePk = parseMod.parseDbml(`
+Table t {
+  x int
+  y int
+  indexes {
+    (x, y) [pk]
+  }
+}
+`)
+check('composite pk marks fields', compositePk.ok && compositePk.model.tables[0].fields.every((field) => field.pk))
+
+const docMod = await server.ssrLoadModule('/src/model/document-io.ts')
+const multi = docMod.serializeDocumentFile({
+  activeSheetId: 'a',
+  sheets: [
+    { id: 'a', name: '甲', dbml: 'Table a { id int }', positions: {}, routes: {}, hiddenInferences: [] },
+    { id: 'b', name: '乙', dbml: 'Table b { id int }', positions: {}, routes: {}, hiddenInferences: [] },
+  ],
+})
+const parsedMulti = docMod.parseDocumentFile(multi)
+check('multi sheet roundtrip', parsedMulti.sheets.length === 2 && parsedMulti.activeSheetId === 'a')
 
 console.log(failures.length ? `FAILED\n${failures.join('\n')}` : 'OK')
 await server.close()

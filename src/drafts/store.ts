@@ -1,3 +1,4 @@
+import { migrateLegacyDraft, type SheetSnapshot } from '../model/document-io'
 import type { Point } from '../model/types'
 
 const KEY = 'er-studio.drafts.v1'
@@ -10,6 +11,8 @@ export interface Draft {
   positions: Record<string, Point>
   routes: Record<string, Point[]>
   hiddenInferences: string[]
+  sheets?: SheetSnapshot[]
+  activeSheetId?: string
   createdAt: number
   updatedAt: number
   zoom: number
@@ -58,7 +61,7 @@ function readAll(): Draft[] {
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(isDraft)
+    return parsed.filter(isDraft).map(normalizeDraft)
   } catch {
     return []
   }
@@ -72,4 +75,19 @@ function isDraft(value: unknown): value is Draft {
   if (!value || typeof value !== 'object') return false
   const draft = value as Partial<Draft>
   return typeof draft.id === 'string' && typeof draft.dbml === 'string' && typeof draft.updatedAt === 'number'
+}
+
+function normalizeDraft(draft: Draft): Draft {
+  if (draft.sheets && draft.sheets.length > 0) return draft
+  const doc = migrateLegacyDraft(draft)
+  const active = doc.sheets.find((sheet) => sheet.id === doc.activeSheetId) ?? doc.sheets[0]
+  return {
+    ...draft,
+    sheets: doc.sheets,
+    activeSheetId: doc.activeSheetId,
+    dbml: active.dbml,
+    positions: active.positions,
+    routes: active.routes,
+    hiddenInferences: active.hiddenInferences,
+  }
 }

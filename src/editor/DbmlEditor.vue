@@ -10,14 +10,25 @@ import type { TextSpan } from '../model/text-edit'
 const host = ref<HTMLElement | null>(null)
 let editor: monaco.editor.IStandaloneCodeEditor | null = null
 let applying = false
+const models = new Map<string, monaco.editor.ITextModel>()
+
+function sheetModel(sheetId: string, text: string): monaco.editor.ITextModel {
+  let model = models.get(sheetId)
+  if (!model) {
+    model = monaco.editor.createModel(text, 'dbml', monaco.Uri.parse(`inmemory://er-studio/${sheetId}.dbml`))
+    models.set(sheetId, model)
+  }
+  return model
+}
 
 onMounted(() => {
   const global = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker: () => Worker } }
   global.MonacoEnvironment = { getWorker: () => new editorWorker() }
   registerDbml(monaco)
   if (!host.value) return
+  const initialModel = sheetModel(workspace.activeSheetId || 'default', workspace.dbml)
   editor = monaco.editor.create(host.value, {
-    value: workspace.dbml,
+    model: initialModel,
     language: 'dbml',
     theme: 'er-studio',
     fontSize: 13.5,
@@ -51,14 +62,27 @@ onMounted(() => {
     undo: () => editor?.trigger('er-studio', 'undo', null),
     redo: () => editor?.trigger('er-studio', 'redo', null),
     getValue: () => editor?.getValue() ?? workspace.dbml,
+    switchSheet: (sheetId: string, text: string) => {
+      if (!editor) return
+      const model = sheetModel(sheetId, text)
+      if (model.getValue() !== text) {
+        applying = true
+        model.setValue(text)
+        applying = false
+      }
+      editor.setModel(model)
+      applyMarkers()
+    },
   })
   applyMarkers()
 })
 
 watch(() => workspace.externalRev, () => {
-  if (!editor || editor.getValue() === workspace.dbml) return
+  if (!editor) return
+  const model = editor.getModel()
+  if (!model || model.getValue() === workspace.dbml) return
   applying = true
-  editor.setValue(workspace.dbml)
+  model.setValue(workspace.dbml)
   applying = false
 })
 

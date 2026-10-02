@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@dbml/core": "^7.1.2",
+    "@dbml/parse": "^7.1.2",
     "monaco-editor": "^0.52.2",
     "vue": "^3.5.13"
   },
