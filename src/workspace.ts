@@ -805,8 +805,19 @@ export function installWindowGuards(): () => void {
 
 export async function exportCurrentSql(dialect: 'postgres' | 'mysql'): Promise<string> {
   syncActiveSheet()
+  if (workspace.issues.length > 0) throw new Error('请先修复 DBML 解析错误')
   const { exportSql } = await import('./model/sql-exchange')
-  return exportSql(workspace.dbml, dialect)
+  return exportSql(workspace.dbml, dialect, workspace.model)
+}
+
+export async function exportDocumentDbml(): Promise<void> {
+  syncActiveSheet()
+  if (workspace.issues.length > 0) throw new Error('请先修复 DBML 解析错误')
+  const { downloadText } = await import('./model/export-diagram')
+  const text = serializeDocumentFile(currentDocument())
+  const name = workspace.fileName.endsWith('.dbml') ? workspace.fileName : `${workspace.fileName.replace(/\.\w+$/, '') || 'diagram'}.dbml`
+  downloadText(text, name, 'text/plain;charset=utf-8')
+  setNote('已导出 DBML（含全部页面与布局）')
 }
 
 export async function importSqlAsNewSheet(sql: string, dialect: 'postgres' | 'mysql'): Promise<void> {
@@ -817,5 +828,26 @@ export async function importSqlAsNewSheet(sql: string, dialect: 'postgres' | 'my
   sheet.dbml = `${dbml.trim()}\n`
   workspace.sheets.push(sheet)
   switchSheet(sheet.id)
-  setNote('已从 SQL 导入到新页')
+  setNote('已从 SQL 导入到新页；枚举取值说明仅在曾写入列注释时才会保留')
+}
+
+export function importDbmlToNewSheet(text: string): void {
+  const trimmed = text.trim()
+  if (!trimmed) return
+  syncActiveSheet()
+  const doc = parseDocumentFile(trimmed)
+  const picked = doc.sheets.find((sheet) => sheet.id === doc.activeSheetId) ?? doc.sheets[0]
+  if (!picked) return
+  const sheet = defaultSheet(picked.name || `页 ${workspace.sheets.length + 1}`)
+  sheet.dbml = picked.dbml
+  sheet.positions = { ...picked.positions }
+  sheet.routes = { ...picked.routes }
+  sheet.hiddenInferences = [...picked.hiddenInferences]
+  workspace.sheets.push(sheet)
+  switchSheet(sheet.id)
+  if (doc.sheets.length > 1) {
+    setNote('已导入当前活动页到新页；多页完整打开请用顶栏「打开」')
+    return
+  }
+  setNote('已导入 DBML 到新页')
 }
