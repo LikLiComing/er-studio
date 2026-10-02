@@ -17,6 +17,7 @@ export interface FieldView {
 
 export interface IndexView {
   label: string
+  pk: boolean
 }
 
 export interface TableView {
@@ -73,6 +74,8 @@ export interface RefView {
   to: RefEnd
   fromCard: Cardinality
   toCard: Cardinality
+  onDelete: string
+  onUpdate: string
 }
 
 export interface EnumLink {

@@ -85,7 +85,13 @@ function shortDefault(value: string): string {
       />
     </div>
     <footer v-if="table.indexes.length">
-      <p v-for="(index, i) in table.indexes" :key="i">{{ index.label }}</p>
+      <p v-for="(index, i) in table.indexes" :key="i">
+        <svg v-if="index.pk" class="icon" viewBox="0 0 16 16" aria-hidden="true">
+          <circle cx="5.2" cy="8" r="2.1" fill="none" stroke="#e8b931" stroke-width="1.6" />
+          <path d="M7.2 8H14M11.6 8v2.1" fill="none" stroke="#e8b931" stroke-width="1.6" stroke-linecap="round" />
+        </svg>
+        {{ index.label }}
+      </p>
     </footer>
   </article>
 </template>
