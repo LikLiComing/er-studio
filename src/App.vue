@@ -25,8 +25,10 @@ import {
   previewDraft,
   save,
   toggleEditor,
+  toggleComments,
   toggleInferred,
   toggleOutline,
+  addTable,
   workspace,
 } from './workspace'
 
@@ -172,6 +174,11 @@ function importDbml(): void {
   }
 }
 
+function addTableFromToolbar(): void {
+  const offset = workspace.model.tables.length * 24
+  addTable(`table_${workspace.model.tables.length + 1}`, { x: 80 + offset, y: 80 + offset })
+}
+
 function startSplit(event: PointerEvent): void {
   splitting.value = true
   const startX = event.clientX
@@ -216,6 +223,8 @@ function startSplit(event: PointerEvent): void {
       <button type="button" :class="{ on: workspace.outlineOpen }" title="搜索并定位表" @click="toggleOutline">表</button>
       <button type="button" :class="{ on: workspace.editorVisible }" title="显示或隐藏编辑器（Ctrl+\）" @click="toggleEditor">编辑器</button>
       <button type="button" :class="{ on: workspace.showInferred }" title="虚线是按字段名推断的外键，未写入文件" @click="toggleInferred">推断</button>
+      <button type="button" :class="{ on: workspace.showComments }" title="显示字段注释列" @click="toggleComments">注释</button>
+      <button type="button" title="在画布上新建一张表" @click="addTableFromToolbar">新表</button>
       <button type="button" :disabled="workspace.model.tables.length === 0 && workspace.model.enums.length === 0" title="按关联关系分组并减少连线交叉，可撤销" @click="beautifyDiagram(); canvas?.fit()">一键美化</button>
       <button type="button" @click="canvas?.fit()">适应</button>
       <button type="button" @click="openFromDevice">打开</button>
@@ -261,7 +270,7 @@ function startSplit(event: PointerEvent): void {
       <span v-else-if="selectedRef?.inferred">推断关系，未写入文件</span>
       <span v-else-if="selectedRef && refConstraintText">{{ refConstraintText }}</span>
       <span v-else-if="selectedRef">拖节点改走线 · 双击拐点取消 · Delete 删除</span>
-      <span v-else class="hint">双击跳到源码 · 拖字段圆点建关系</span>
+      <span v-else class="hint">双击表名/字段可编辑 · 右键字段改主键 · 拖圆点建关系</span>
       <button v-if="selectedRef?.inferred" type="button" class="linkish" @click="materializeSelected">写入文件</button>
       <button v-if="selectedRef" type="button" class="linkish" @click="deleteSelectedRef">{{ selectedRef.inferred ? '隐藏推断' : '删除关系' }}</button>
       <button v-if="omittedText" type="button" class="linkish" :title="omittedText" @click="dismissOmitted">{{ omittedText }}</button>
@@ -380,7 +389,15 @@ button:hover { background: #f7f6f3; }
   background: #fffcf8;
   border-bottom: 1px solid #e7e3dc;
 }
-.bar { height: 48px; flex: none; }
+.bar {
+  min-height: 48px;
+  height: auto;
+  flex: none;
+  flex-wrap: wrap;
+  row-gap: 6px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
 .status {
   height: 30px;
   border-bottom: 0;
@@ -436,9 +453,12 @@ em {
   padding: 0 8px;
   font-size: 12px;
 }
+@media (max-width: 1200px) {
+  .file { max-width: 120px; }
+}
 @media (max-width: 860px) {
   .hint { display: none; }
-  .bar { height: auto; flex-wrap: wrap; padding: 8px; }
+  .bar { padding: 8px; }
   .body { flex-direction: column; }
   .pane { width: 100% !important; height: 38vh; }
   .splitter { display: none; }

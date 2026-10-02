@@ -183,6 +183,13 @@ const enriched = enrichMod.enrichDbmlForSqlExport(sampleDbml, {
   omitted: [],
 })
 check('sql enrich adds enum note', enriched.includes('枚举 s') && enriched.includes('启用'))
+const dbmlEditMod = await server.ssrLoadModule('/src/model/dbml-edit.ts')
+const fieldLine = '  email varchar(255) [not null, note: \'联系\']'
+const parsedField = dbmlEditMod.parseFieldLine(fieldLine)
+check('parse field line', Boolean(parsedField && parsedField.name === 'email' && parsedField.note === '联系'))
+const toggled = dbmlEditMod.buildFieldLine(dbmlEditMod.toggleFieldSetting(parsedField, 'unique'))
+check('toggle unique setting', toggled.includes('unique'))
+
 check('sql enrich header', enrichMod.buildEnumSqlHeader({
   tables: [],
   enums: [{ id: 's', name: 's', values: [{ name: 'on', note: '启用' }] }],

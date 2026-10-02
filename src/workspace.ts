@@ -14,6 +14,20 @@ import { beautifyPositions, reconcilePositions } from './model/layout'
 import { dbmlIdent, inferenceKey, locateNode, parseDbml, parserReady, refOperator } from './model/parse'
 import { routeKey } from './model/route'
 import { SAMPLE_DBML } from './model/sample'
+import {
+  buildFieldLine,
+  deleteFieldLine,
+  insertFieldLine,
+  newTableBlock,
+  parseFieldLine,
+  renameFieldOnLine,
+  renameTableLine,
+  setTableNote,
+  tableBlockRange,
+  toggleFieldSetting,
+  updateFieldLine,
+  type FieldLineParts,
+} from './model/dbml-edit'
 import { applySpan, deleteRange, insertBlock, type TextSpan } from './model/text-edit'
 import type { ParseIssue, Point, RefView, SchemaModel } from './model/types'
 
@@ -73,6 +87,7 @@ export const workspace = reactive({
   routes: {} as Record<string, Point[]>,
   hiddenInferences: [] as string[],
   showInferred: true,
+  showComments: true,
   outlineOpen: false,
   omittedDismissed: false,
   model: emptyModel as SchemaModel,
@@ -204,6 +219,108 @@ export function toggleInferred(): void {
   workspace.showInferred = !workspace.showInferred
   const selected = selectedRef()
   if (selected && !isRefVisible(selected)) workspace.selectedRefId = null
+}
+
+export function toggleComments(): void {
+  workspace.showComments = !workspace.showComments
+}
+
+export function renameTable(tableId: string, name: string): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const trimmed = name.trim()
+  if (!table || !trimmed || trimmed === table.name) return
+  commitText(renameTableLine(currentText(), table.line, trimmed, table.schemaName))
+}
+
+export function setTableNoteText(tableId: string, note: string): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  if (!table) return
+  commitText(setTableNote(currentText(), table.line, note.trim()))
+}
+
+export function renameField(tableId: string, fieldName: string, nextName: string): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const field = table?.fields.find((item) => item.name === fieldName)
+  const trimmed = nextName.trim()
+  if (!field || !trimmed || trimmed === fieldName) return
+  const line = currentText().split('\n')[field.line - 1] ?? ''
+  commitText(lineSpan(field.line, renameFieldOnLine(line, trimmed)))
+}
+
+export function updateField(tableId: string, fieldName: string, patch: Partial<FieldLineParts>): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const field = table?.fields.find((item) => item.name === fieldName)
+  if (!field) return
+  const line = currentText().split('\n')[field.line - 1] ?? ''
+  const parts = parseFieldLine(line)
+  if (!parts) return
+  const next = buildFieldLine({
+    ...parts,
+    ...patch,
+    settings: patch.settings ?? parts.settings,
+    note: patch.note ?? parts.note,
+  })
+  commitText(lineSpan(field.line, next))
+}
+
+export function setFieldType(tableId: string, fieldName: string, typeName: string): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const field = table?.fields.find((item) => item.name === fieldName)
+  if (!field) return
+  const line = currentText().split('\n')[field.line - 1] ?? ''
+  commitText(lineSpan(field.line, updateFieldLine(line, { typeName: typeName.trim() || 'varchar' })))
+}
+
+export function setFieldNote(tableId: string, fieldName: string, note: string): void {
+  updateField(tableId, fieldName, { note: note.trim() })
+}
+
+export function toggleFieldFlag(tableId: string, fieldName: string, flag: 'pk' | 'not null' | 'unique'): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const field = table?.fields.find((item) => item.name === fieldName)
+  if (!field) return
+  const line = currentText().split('\n')[field.line - 1] ?? ''
+  const parts = parseFieldLine(line)
+  if (!parts) return
+  commitText(lineSpan(field.line, buildFieldLine(toggleFieldSetting(parts, flag))))
+}
+
+export function removeField(tableId: string, fieldName: string): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  const field = table?.fields.find((item) => item.name === fieldName)
+  if (!table || !field) return
+  if (!window.confirm(`删除字段「${fieldName}」？`)) return
+  commitText(deleteFieldLine(currentText(), field.line))
+}
+
+export function addField(tableId: string, name = 'new_field'): void {
+  const table = workspace.model.tables.find((item) => item.id === tableId)
+  if (!table) return
+  const parts: FieldLineParts = { name, typeName: 'varchar', settings: [], note: '' }
+  const block = tableBlockRange(currentText(), table.line)
+  const inserted = insertFieldLine(currentText(), table.line, parts)
+  commitText(inserted, block?.end ?? table.line + 1)
+}
+
+export function addTable(name: string, position?: Point): void {
+  const trimmed = name.trim() || `table_${workspace.model.tables.length + 1}`
+  const inserted = insertBlock(currentText(), newTableBlock(trimmed))
+  commitText(inserted.span, inserted.selectLine)
+  if (position) {
+    window.setTimeout(() => {
+      const hit = workspace.model.tables.find((item) => item.name === trimmed || item.id === trimmed || item.id.endsWith(`.${trimmed}`))
+      if (!hit) return
+      workspace.positions[hit.id] = position
+      workspace.dirty = true
+      schedulePersist()
+    }, 280)
+  }
+  workspace.pendingFit = false
+}
+
+function lineSpan(line: number, text: string): TextSpan {
+  const content = currentText().split('\n')[line - 1] ?? ''
+  return { line, column: 1, endLine: line, endColumn: content.length + 1, text }
 }
 
 export function dismissOmitted(): void {
@@ -762,6 +879,24 @@ export function installWindowGuards(): () => void {
       event.preventDefault()
       event.stopPropagation()
       toggleEditor()
+      return
+    }
+    if (meta && (key === '=' || key === '+')) {
+      event.preventDefault()
+      event.stopPropagation()
+      window.dispatchEvent(new CustomEvent('er-studio-zoom', { detail: { factor: 1.12 } }))
+      return
+    }
+    if (meta && key === '-') {
+      event.preventDefault()
+      event.stopPropagation()
+      window.dispatchEvent(new CustomEvent('er-studio-zoom', { detail: { factor: 1 / 1.12 } }))
+      return
+    }
+    if (meta && key === '0') {
+      event.preventDefault()
+      event.stopPropagation()
+      window.dispatchEvent(new CustomEvent('er-studio-zoom', { detail: { reset: true } }))
       return
     }
     if (meta && key === 'z') {
