@@ -3,7 +3,32 @@ import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import DiagramCanvas from './canvas/DiagramCanvas.vue'
 import DraftPicker from './drafts/DraftPicker.vue'
 import { listDrafts, type Draft } from './drafts/store'
-import { backToStart, beautifyDiagram, continueDraft, createNew, deleteSelectedRef, discardAllDrafts, discardDraft, dismissOmitted, exportCurrentSql, importSqlAsNewSheet, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, previewDraft, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
+import MenuButton from './ui/MenuButton.vue'
+import {
+  backToStart,
+  beautifyDiagram,
+  continueDraft,
+  createNew,
+  deleteSelectedRef,
+  discardAllDrafts,
+  discardDraft,
+  dismissOmitted,
+  exportCurrentSql,
+  exportDocumentDbml,
+  importDbmlToNewSheet,
+  importSqlAsNewSheet,
+  isRefVisible,
+  jumpTo,
+  materializeSelected,
+  openFromDevice,
+  openSample,
+  previewDraft,
+  save,
+  toggleEditor,
+  toggleInferred,
+  toggleOutline,
+  workspace,
+} from './workspace'
 
 const DbmlEditor = defineAsyncComponent(() => import('./editor/DbmlEditor.vue'))
 
@@ -12,6 +37,9 @@ const splitting = ref(false)
 const pickerOpen = ref(false)
 const drafts = ref<Draft[]>([])
 const pickerId = ref('')
+
+const canExportStructure = computed(() => workspace.issues.length === 0)
+const canExportImage = computed(() => workspace.model.tables.length > 0)
 
 const issueText = computed(() => {
   const issue = workspace.issues[0]
@@ -108,9 +136,19 @@ async function exportSql(kind: 'postgres' | 'mysql'): Promise<void> {
     link.download = `${workspace.fileName.replace(/\.dbml$/i, '') || 'schema'}.${kind === 'postgres' ? 'pgsql' : 'sql'}`
     link.click()
     URL.revokeObjectURL(url)
-    workspace.statusNote = kind === 'postgres' ? '已导出 PostgreSQL DDL' : '已导出 MySQL DDL'
+    workspace.statusNote = kind === 'postgres'
+      ? '已导出 PostgreSQL DDL；Enum 说明已写入列注释与文件头'
+      : '已导出 MySQL DDL；Enum 说明已写入列注释与文件头'
   } catch (error) {
     workspace.statusNote = error instanceof Error ? `SQL 导出失败：${error.message}` : 'SQL 导出失败'
+  }
+}
+
+async function exportDbml(): Promise<void> {
+  try {
+    await exportDocumentDbml()
+  } catch (error) {
+    workspace.statusNote = error instanceof Error ? `DBML 导出失败：${error.message}` : 'DBML 导出失败'
   }
 }
 
@@ -121,6 +159,16 @@ async function importSql(kind: 'postgres' | 'mysql'): Promise<void> {
     await importSqlAsNewSheet(sql, kind)
   } catch (error) {
     workspace.statusNote = error instanceof Error ? `SQL 导入失败：${error.message}` : 'SQL 导入失败'
+  }
+}
+
+function importDbml(): void {
+  const dbml = window.prompt('粘贴 DBML 到新页（多页文件请用顶栏「打开」）', '')
+  if (!dbml?.trim()) return
+  try {
+    importDbmlToNewSheet(dbml)
+  } catch (error) {
+    workspace.statusNote = error instanceof Error ? `DBML 导入失败：${error.message}` : 'DBML 导入失败'
   }
 }
 
@@ -171,12 +219,30 @@ function startSplit(event: PointerEvent): void {
       <button type="button" :disabled="workspace.model.tables.length === 0 && workspace.model.enums.length === 0" title="按关联关系分组并减少连线交叉，可撤销" @click="beautifyDiagram(); canvas?.fit()">一键美化</button>
       <button type="button" @click="canvas?.fit()">适应</button>
       <button type="button" @click="openFromDevice">打开</button>
-      <button type="button" :disabled="workspace.model.tables.length === 0" @click="canvas?.exportPngFile()">PNG</button>
-      <button type="button" :disabled="workspace.model.tables.length === 0" @click="canvas?.exportSvgFile()">SVG</button>
-      <button type="button" :disabled="workspace.issues.length > 0" @click="exportSql('postgres')">PG SQL</button>
-      <button type="button" :disabled="workspace.issues.length > 0" @click="exportSql('mysql')">MySQL</button>
-      <button type="button" @click="importSql('postgres')">导入 PG</button>
-      <button type="button" @click="importSql('mysql')">导入 MySQL</button>
+      <MenuButton label="导入">
+        <div class="menu-group">
+          <span class="menu-label">数据库 DDL</span>
+          <button type="button" class="menu-item" title="粘贴 PostgreSQL DDL，导入到新页" @click="importSql('postgres')">PostgreSQL SQL</button>
+          <button type="button" class="menu-item" title="粘贴 MySQL DDL，导入到新页" @click="importSql('mysql')">MySQL SQL</button>
+        </div>
+        <div class="menu-group">
+          <span class="menu-label">DBML</span>
+          <button type="button" class="menu-item" title="粘贴 DBML 到新页；多页完整打开请用「打开」" @click="importDbml">DBML 到新页</button>
+        </div>
+      </MenuButton>
+      <MenuButton label="导出">
+        <div class="menu-group">
+          <span class="menu-label">结构</span>
+          <button type="button" class="menu-item" :disabled="!canExportStructure" title="含全部页面与布局，完整语义" @click="exportDbml">DBML（整份文档）</button>
+          <button type="button" class="menu-item" :disabled="!canExportStructure" title="SQL 适合建表；Enum 取值说明会写入列注释。颜色与多页请用 DBML" @click="exportSql('postgres')">PostgreSQL SQL</button>
+          <button type="button" class="menu-item" :disabled="!canExportStructure" title="SQL 适合建表；Enum 取值说明会写入列注释。颜色与多页请用 DBML" @click="exportSql('mysql')">MySQL SQL</button>
+        </div>
+        <div class="menu-group">
+          <span class="menu-label">图片</span>
+          <button type="button" class="menu-item" :disabled="!canExportImage" @click="canvas?.exportPngFile()">PNG</button>
+          <button type="button" class="menu-item" :disabled="!canExportImage" @click="canvas?.exportSvgFile()">SVG</button>
+        </div>
+      </MenuButton>
       <button type="button" class="primary" @click="save(false)">保存</button>
       <button type="button" @click="save(true)">另存为</button>
     </header>

@@ -159,6 +159,38 @@ const multi = docMod.serializeDocumentFile({
 const parsedMulti = docMod.parseDocumentFile(multi)
 check('multi sheet roundtrip', parsedMulti.sheets.length === 2 && parsedMulti.activeSheetId === 'a')
 
+const enrichMod = await server.ssrLoadModule('/src/model/sql-export-enrich.ts')
+const sampleDbml = `Enum s {
+  on [note: '启用']
+  off
+}
+Table t {
+  id int [pk]
+  flag s
+}
+`
+const enriched = enrichMod.enrichDbmlForSqlExport(sampleDbml, {
+  tables: [{
+    id: 't',
+    fields: [
+      { name: 'id', line: 6, pk: true },
+      { name: 'flag', line: 7, pk: false },
+    ],
+  }],
+  enums: [{ id: 's', name: 's', values: [{ name: 'on', note: '启用' }, { name: 'off', note: '' }] }],
+  enumLinks: [{ tableId: 't', field: 'flag', enumId: 's' }],
+  refs: [],
+  omitted: [],
+})
+check('sql enrich adds enum note', enriched.includes('枚举 s') && enriched.includes('启用'))
+check('sql enrich header', enrichMod.buildEnumSqlHeader({
+  tables: [],
+  enums: [{ id: 's', name: 's', values: [{ name: 'on', note: '启用' }] }],
+  enumLinks: [],
+  refs: [],
+  omitted: [],
+}).includes('ER Studio'))
+
 console.log(failures.length ? `FAILED\n${failures.join('\n')}` : 'OK')
 await server.close()
 if (failures.length) process.exit(1)
