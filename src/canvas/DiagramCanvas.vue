@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import CardinalityMenu from './CardinalityMenu.vue'
 import EnumCard from './EnumCard.vue'
 import Outline from './Outline.vue'
@@ -8,7 +8,27 @@ import TableCard from './TableCard.vue'
 import { nudgeCorner, nudgeSegment, removeCorner, type BendHandle, type Box } from '../model/route'
 import type { Point } from '../model/types'
 import { buildDiagramSvg, downloadBlob, downloadText, svgToPng } from '../model/export-diagram'
-import { addRef, isRefVisible, jumpTo, moveNode, rememberLayout, selectNode, selectRef, setRoute, workspace, type RefOp } from '../workspace'
+import {
+  addField,
+  addRef,
+  addTable,
+  isRefVisible,
+  jumpTo,
+  moveNode,
+  rememberLayout,
+  removeField,
+  renameField,
+  renameTable,
+  selectNode,
+  selectRef,
+  setFieldNote,
+  setFieldType,
+  setRoute,
+  setTableNoteText,
+  toggleFieldFlag,
+  workspace,
+  type RefOp,
+} from '../workspace'
 import SheetTabs from './SheetTabs.vue'
 
 const props = defineProps<{ readonly?: boolean }>()
@@ -39,6 +59,7 @@ const boxes = computed(() => {
 })
 
 const drawnRefs = computed(() => workspace.model.refs.filter(isRefVisible))
+const enumTypes = computed(() => workspace.model.enums.map((item) => item.name))
 
 const fkByTable = computed(() => {
   const map = new Map<string, string[]>()
@@ -62,13 +83,27 @@ const dotStyle = computed(() => ({
   backgroundPosition: `${workspace.pan.x % 18}px ${workspace.pan.y % 18}px`,
 }))
 
+const onZoomEvent = (event: Event) => {
+  const detail = (event as CustomEvent<{ factor?: number; reset?: boolean }>).detail
+  if (detail?.reset) {
+    fit()
+    return
+  }
+  if (detail?.factor) zoomBy(detail.factor)
+}
+
 onMounted(async () => {
+  window.addEventListener('er-studio-zoom', onZoomEvent)
   await nextTick()
   measure()
   if (workspace.pendingFit) {
     fit(Boolean(props.readonly))
     workspace.pendingFit = false
   }
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('er-studio-zoom', onZoomEvent)
 })
 
 watch(() => workspace.model, async () => {
@@ -132,7 +167,7 @@ function onPointerDown(event: PointerEvent): void {
   if (event.button !== 0) return
   if (pendingLink.value) pendingLink.value = null
   const target = event.target as HTMLElement
-  if (target.closest('[data-drag-handle], [data-link-handle], [data-node-id], .hit, .bend, .outline, .menu')) return
+  if (target.closest('[data-drag-handle], [data-link-handle], [data-node-id], .hit, .bend, .outline, .menu, .picker, .card, .add-field, input, button, textarea, .type, .del, .comment, .comment-input, .field')) return
   selectNode(null)
   const startX = event.clientX
   const startY = event.clientY
@@ -317,6 +352,14 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
+function onViewportDblClick(event: MouseEvent): void {
+  if (props.readonly) return
+  const target = event.target as HTMLElement
+  if (target.closest('[data-node-id], .zoom, .sheet-tabs, .outline, .menu, .picker')) return
+  const point = clientToWorld(event.clientX, event.clientY)
+  addTable(`table_${workspace.model.tables.length + 1}`, point)
+}
+
 async function exportSvgFile(): Promise<void> {
   measure()
   await nextTick()
@@ -362,7 +405,7 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
 </script>
 
 <template>
-  <div ref="viewport" class="viewport" :style="dotStyle" @wheel.prevent="onWheel" @pointerdown="onPointerDown">
+  <div ref="viewport" class="viewport" :style="dotStyle" @wheel.prevent="onWheel" @pointerdown="onPointerDown" @dblclick="onViewportDblClick">
     <Outline v-if="workspace.outlineOpen" />
     <div ref="world" class="world" :style="worldStyle">
       <RelationLayer
@@ -385,11 +428,21 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
         :selected="workspace.selectedId === table.id"
         :fk-fields="fkByTable.get(table.id) ?? []"
         :drop-field="drop.tableId === table.id ? drop.field : ''"
+        :show-comments="workspace.showComments"
+        :enum-types="enumTypes"
+        :readonly="readonly"
         :style="{ left: `${workspace.positions[table.id]?.x ?? 0}px`, top: `${workspace.positions[table.id]?.y ?? 0}px` }"
         @select="selectNode(table.id)"
         @move-start="onMoveStart(table.id, $event)"
         @link-start="(field, event) => onLinkStart(table.id, field, event)"
-        @jump="jumpTo"
+        @rename-table="renameTable(table.id, $event)"
+        @set-table-note="setTableNoteText(table.id, $event)"
+        @rename-field="(field, name) => renameField(table.id, field, name)"
+        @set-field-type="(field, type) => setFieldType(table.id, field, type)"
+        @set-field-note="(field, note) => setFieldNote(table.id, field, note)"
+        @toggle-field-flag="(field, flag) => toggleFieldFlag(table.id, field, flag)"
+        @delete-field="(field) => removeField(table.id, field)"
+        @add-field="addField(table.id)"
       />
       <EnumCard
         v-for="item in workspace.model.enums"
@@ -403,7 +456,7 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
       />
     </div>
     <p v-if="workspace.model.tables.length === 0 && workspace.issues.length === 0" class="empty">
-      在左侧写下 Table，关系图会出现在这里
+      双击空白处新建表，或在左侧写 DBML
     </p>
     <CardinalityMenu
       v-if="pendingLink"
@@ -414,10 +467,10 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
       @cancel="pendingLink = null"
     />
     <div class="zoom">
-      <button type="button" @click="zoomBy(1 / 1.12)">缩小</button>
+      <button type="button" title="缩小（Ctrl+-）" @click="zoomBy(1 / 1.12)">−</button>
       <span>{{ Math.round(workspace.zoom * 100) }}%</span>
-      <button type="button" @click="zoomBy(1.12)">放大</button>
-      <button type="button" @click="fit()">适应</button>
+      <button type="button" title="放大（Ctrl+=）" @click="zoomBy(1.12)">+</button>
+      <button type="button" title="重置为适应窗口" @click="fit()">适应</button>
     </div>
     <SheetTabs v-if="!readonly" class="sheet-tabs" />
   </div>
@@ -456,7 +509,8 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
 .zoom {
   position: absolute;
   right: 14px;
-  bottom: 14px;
+  bottom: 52px;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -484,8 +538,5 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
   right: 0;
   bottom: 0;
   z-index: 4;
-}
-@media (max-width: 860px) {
-  .zoom { display: none; }
 }
 </style>
