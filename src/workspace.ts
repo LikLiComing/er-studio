@@ -28,6 +28,7 @@ import {
   updateFieldLine,
   type FieldLineParts,
 } from './model/dbml-edit'
+import { clampEditorWidth } from './model/layout-ui'
 import { applySpan, deleteRange, insertBlock, type TextSpan } from './model/text-edit'
 import type { ParseIssue, Point, RefView, SchemaModel } from './model/types'
 
@@ -490,9 +491,10 @@ function loadDraft(draft: Draft, asSession: boolean): void {
     ? { sheets: draft.sheets.map(cloneSheet), activeSheetId: draft.activeSheetId || draft.sheets[0].id }
     : parseDocumentFile(appendLayout(draft.dbml, draft.positions ?? {}, draft.routes ?? {}, draft.hiddenInferences ?? []))
   openDocument(doc, draft.fileName || '未命名.dbml', null, asSession, false)
-  workspace.zoom = draft.zoom || 1
+  const savedZoom = draft.zoom
+  workspace.zoom = typeof savedZoom === 'number' && savedZoom >= 0.25 && savedZoom <= 2 ? savedZoom : 1
   workspace.pan = draft.pan ?? { x: 40, y: 32 }
-  if (draft.editorWidth) workspace.editorWidth = draft.editorWidth
+  workspace.editorWidth = clampEditorWidth(draft.editorWidth || workspace.editorWidth, window.innerWidth)
   workspace.pendingFit = true
   if (asSession) {
     draftId = draft.id
@@ -572,7 +574,7 @@ function openDocument(doc: DocumentSnapshot, name: string, handle: FileSystemFil
   workspace.zoom = 1
   workspace.pan = { x: 40, y: 32 }
   workspace.editorVisible = true
-  workspace.editorWidth = Math.round(Math.min(560, Math.max(320, window.innerWidth * 0.38)))
+  workspace.editorWidth = clampEditorWidth(Math.round(window.innerWidth * 0.38), window.innerWidth)
   workspace.pendingFit = fit
   workspace.pendingSelectLine = 0
   workspace.omittedDismissed = false

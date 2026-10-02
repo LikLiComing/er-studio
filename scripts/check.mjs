@@ -183,6 +183,10 @@ const enriched = enrichMod.enrichDbmlForSqlExport(sampleDbml, {
   omitted: [],
 })
 check('sql enrich adds enum note', enriched.includes('枚举 s') && enriched.includes('启用'))
+const layoutUiMod = await server.ssrLoadModule('/src/model/layout-ui.ts')
+check('clamp editor width on narrow viewport', layoutUiMod.clampEditorWidth(2000, 900) === 560)
+check('clamp editor width leaves canvas room', 900 - layoutUiMod.clampEditorWidth(2000, 900) >= layoutUiMod.MIN_CANVAS_WIDTH)
+
 const dbmlEditMod = await server.ssrLoadModule('/src/model/dbml-edit.ts')
 const fieldLine = '  email varchar(255) [not null, note: \'联系\']'
 const parsedField = dbmlEditMod.parseFieldLine(fieldLine)

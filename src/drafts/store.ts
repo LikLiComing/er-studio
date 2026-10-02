@@ -1,3 +1,4 @@
+import { clampEditorWidth } from '../model/layout-ui'
 import { migrateLegacyDraft, type SheetSnapshot } from '../model/document-io'
 import type { Point } from '../model/types'
 
@@ -78,11 +79,14 @@ function isDraft(value: unknown): value is Draft {
 }
 
 function normalizeDraft(draft: Draft): Draft {
-  if (draft.sheets && draft.sheets.length > 0) return draft
+  const innerWidth = typeof window !== 'undefined' ? window.innerWidth : 1280
+  const editorWidth = clampEditorWidth(typeof draft.editorWidth === 'number' ? draft.editorWidth : 520, innerWidth)
+  if (draft.sheets && draft.sheets.length > 0) return { ...draft, editorWidth }
   const doc = migrateLegacyDraft(draft)
   const active = doc.sheets.find((sheet) => sheet.id === doc.activeSheetId) ?? doc.sheets[0]
   return {
     ...draft,
+    editorWidth,
     sheets: doc.sheets,
     activeSheetId: doc.activeSheetId,
     dbml: active.dbml,

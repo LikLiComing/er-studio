@@ -479,8 +479,8 @@ defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
 <style scoped>
 .viewport {
   position: relative;
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 260px;
+  min-width: 260px;
   min-height: 0;
   padding-bottom: 42px;
   overflow: hidden;

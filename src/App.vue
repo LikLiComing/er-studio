@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
+import { clampEditorWidth } from './model/layout-ui'
 import DiagramCanvas from './canvas/DiagramCanvas.vue'
 import DraftPicker from './drafts/DraftPicker.vue'
 import { listDrafts, type Draft } from './drafts/store'
@@ -73,8 +74,18 @@ const omittedText = computed(() => {
   return `文件含有 ${workspace.model.omitted.join('、')}，图上未画出`
 })
 
+const onWindowResize = () => {
+  if (workspace.screen !== 'editor' || !workspace.editorVisible) return
+  workspace.editorWidth = clampEditorWidth(workspace.editorWidth, window.innerWidth)
+}
+
 onMounted(() => {
   openPickerIfAny()
+  window.addEventListener('resize', onWindowResize)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', onWindowResize)
 })
 
 function openPickerIfAny(): void {
@@ -184,8 +195,7 @@ function startSplit(event: PointerEvent): void {
   const startX = event.clientX
   const startW = workspace.editorWidth
   const move = (ev: PointerEvent) => {
-    const max = Math.min(window.innerWidth * 0.5, window.innerWidth - 280)
-    workspace.editorWidth = Math.round(Math.min(max, Math.max(240, startW + ev.clientX - startX)))
+    workspace.editorWidth = clampEditorWidth(startW + ev.clientX - startX, window.innerWidth)
   }
   const up = () => {
     splitting.value = false
