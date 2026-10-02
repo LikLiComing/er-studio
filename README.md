@@ -4,7 +4,7 @@
 
 ## 在线体验
 
-**https://likllicoming.github.io/er-studio/**
+**https://LikLiComing.github.io/er-studio/**
 
 （需仓库已启用 GitHub Pages，且 Source 为 GitHub Actions。）
 
