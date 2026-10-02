@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import DiagramCanvas from './canvas/DiagramCanvas.vue'
 import DraftPicker from './drafts/DraftPicker.vue'
 import { listDrafts, type Draft } from './drafts/store'
-import DbmlEditor from './editor/DbmlEditor.vue'
-import { backToStart, beautifyDiagram, continueDraft, createNew, deleteSelectedRef, discardAllDrafts, discardDraft, dismissOmitted, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, previewDraft, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
+import { backToStart, beautifyDiagram, continueDraft, createNew, deleteSelectedRef, discardAllDrafts, discardDraft, dismissOmitted, exportCurrentSql, importSqlAsNewSheet, isRefVisible, jumpTo, materializeSelected, openFromDevice, openSample, previewDraft, save, toggleEditor, toggleInferred, toggleOutline, workspace } from './workspace'
 
-const canvas = ref<{ fit: () => void; zoomBy: (factor: number) => void } | null>(null)
+const DbmlEditor = defineAsyncComponent(() => import('./editor/DbmlEditor.vue'))
+
+const canvas = ref<{ fit: () => void; zoomBy: (factor: number) => void; exportSvgFile: () => Promise<void>; exportPngFile: () => Promise<void> } | null>(null)
 const splitting = ref(false)
 const pickerOpen = ref(false)
 const drafts = ref<Draft[]>([])
@@ -26,6 +27,16 @@ const summary = computed(() => {
 })
 
 const selectedRef = computed(() => workspace.model.refs.find((ref) => ref.id === workspace.selectedRefId) ?? null)
+
+const refConstraintText = computed(() => {
+  const ref = selectedRef.value
+  if (!ref || ref.inferred) return ''
+  const parts = [
+    ref.onDelete ? `删除 ${ref.onDelete}` : '',
+    ref.onUpdate ? `更新 ${ref.onUpdate}` : '',
+  ].filter(Boolean)
+  return parts.join(' · ')
+})
 
 const omittedText = computed(() => {
   if (workspace.omittedDismissed || workspace.model.omitted.length === 0) return ''
@@ -87,6 +98,32 @@ function startBlank(): void {
   createNew()
 }
 
+async function exportSql(kind: 'postgres' | 'mysql'): Promise<void> {
+  try {
+    const sql = await exportCurrentSql(kind)
+    const blob = new Blob([sql], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${workspace.fileName.replace(/\.dbml$/i, '') || 'schema'}.${kind === 'postgres' ? 'pgsql' : 'sql'}`
+    link.click()
+    URL.revokeObjectURL(url)
+    workspace.statusNote = kind === 'postgres' ? '已导出 PostgreSQL DDL' : '已导出 MySQL DDL'
+  } catch (error) {
+    workspace.statusNote = error instanceof Error ? `SQL 导出失败：${error.message}` : 'SQL 导出失败'
+  }
+}
+
+async function importSql(kind: 'postgres' | 'mysql'): Promise<void> {
+  const sql = window.prompt(kind === 'postgres' ? '粘贴 PostgreSQL DDL' : '粘贴 MySQL DDL', '')
+  if (!sql?.trim()) return
+  try {
+    await importSqlAsNewSheet(sql, kind)
+  } catch (error) {
+    workspace.statusNote = error instanceof Error ? `SQL 导入失败：${error.message}` : 'SQL 导入失败'
+  }
+}
+
 function startSplit(event: PointerEvent): void {
   splitting.value = true
   const startX = event.clientX
@@ -134,6 +171,12 @@ function startSplit(event: PointerEvent): void {
       <button type="button" :disabled="workspace.model.tables.length === 0 && workspace.model.enums.length === 0" title="按关联关系分组并减少连线交叉，可撤销" @click="beautifyDiagram(); canvas?.fit()">一键美化</button>
       <button type="button" @click="canvas?.fit()">适应</button>
       <button type="button" @click="openFromDevice">打开</button>
+      <button type="button" :disabled="workspace.model.tables.length === 0" @click="canvas?.exportPngFile()">PNG</button>
+      <button type="button" :disabled="workspace.model.tables.length === 0" @click="canvas?.exportSvgFile()">SVG</button>
+      <button type="button" :disabled="workspace.issues.length > 0" @click="exportSql('postgres')">PG SQL</button>
+      <button type="button" :disabled="workspace.issues.length > 0" @click="exportSql('mysql')">MySQL</button>
+      <button type="button" @click="importSql('postgres')">导入 PG</button>
+      <button type="button" @click="importSql('mysql')">导入 MySQL</button>
       <button type="button" class="primary" @click="save(false)">保存</button>
       <button type="button" @click="save(true)">另存为</button>
     </header>
@@ -150,6 +193,7 @@ function startSplit(event: PointerEvent): void {
       <span>{{ summary }}</span>
       <button v-if="issueText" type="button" class="error linkish" @click="jumpTo(workspace.issues[0].line)">{{ issueText }}</button>
       <span v-else-if="selectedRef?.inferred">推断关系，未写入文件</span>
+      <span v-else-if="selectedRef && refConstraintText">{{ refConstraintText }}</span>
       <span v-else-if="selectedRef">拖节点改走线 · 双击拐点取消 · Delete 删除</span>
       <span v-else class="hint">双击跳到源码 · 拖字段圆点建关系</span>
       <button v-if="selectedRef?.inferred" type="button" class="linkish" @click="materializeSelected">写入文件</button>

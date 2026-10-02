@@ -7,7 +7,9 @@ import RelationLayer from './RelationLayer.vue'
 import TableCard from './TableCard.vue'
 import { nudgeCorner, nudgeSegment, removeCorner, type BendHandle, type Box } from '../model/route'
 import type { Point } from '../model/types'
+import { buildDiagramSvg, downloadBlob, downloadText, svgToPng } from '../model/export-diagram'
 import { addRef, isRefVisible, jumpTo, moveNode, rememberLayout, selectNode, selectRef, setRoute, workspace, type RefOp } from '../workspace'
+import SheetTabs from './SheetTabs.vue'
 
 const props = defineProps<{ readonly?: boolean }>()
 
@@ -315,7 +317,48 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
 }
 
-defineExpose({ fit, zoomBy })
+async function exportSvgFile(): Promise<void> {
+  measure()
+  await nextTick()
+  const svg = buildDiagramSvg(collectExportInput())
+  downloadText(svg, `${baseName()}.svg`, 'image/svg+xml;charset=utf-8')
+}
+
+async function exportPngFile(): Promise<void> {
+  measure()
+  await nextTick()
+  const svg = buildDiagramSvg(collectExportInput())
+  const png = await svgToPng(svg)
+  downloadBlob(png, `${baseName()}.png`)
+}
+
+function collectExportInput() {
+  const cardHtml: Record<string, string> = {}
+  if (world.value) {
+    for (const card of world.value.querySelectorAll<HTMLElement>('[data-node-id]')) {
+      const id = card.dataset.nodeId
+      if (!id) continue
+      cardHtml[id] = `<div xmlns="http://www.w3.org/1999/xhtml">${card.outerHTML}</div>`
+    }
+  }
+  return {
+    model: workspace.model,
+    boxes: boxes.value,
+    fieldY,
+    routes: workspace.routes,
+    refs: drawnRefs.value,
+    cardHtml,
+  }
+}
+
+function baseName(): string {
+  const sheet = workspace.sheets.find((item) => item.id === workspace.activeSheetId)
+  const stem = workspace.fileName.replace(/\.dbml$/i, '') || 'diagram'
+  const suffix = sheet && workspace.sheets.length > 1 ? `-${sheet.name}` : ''
+  return `${stem}${suffix}`.replace(/[^\w\u4e00-\u9fff.-]+/g, '_')
+}
+
+defineExpose({ fit, zoomBy, exportSvgFile, exportPngFile })
 </script>
 
 <template>
@@ -376,6 +419,7 @@ defineExpose({ fit, zoomBy })
       <button type="button" @click="zoomBy(1.12)">放大</button>
       <button type="button" @click="fit()">适应</button>
     </div>
+    <SheetTabs v-if="!readonly" class="sheet-tabs" />
   </div>
 </template>
 
@@ -385,6 +429,7 @@ defineExpose({ fit, zoomBy })
   flex: 1;
   min-width: 0;
   min-height: 0;
+  padding-bottom: 42px;
   overflow: hidden;
   background-color: #eef1f3;
   background-image: radial-gradient(#d5dbdf 1px, transparent 1px);
@@ -433,6 +478,13 @@ defineExpose({ fit, zoomBy })
 }
 .zoom button { cursor: pointer; }
 .zoom button:hover { background: #f4f6f5; }
+.sheet-tabs {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 4;
+}
 @media (max-width: 860px) {
   .zoom { display: none; }
 }
